@@ -7,6 +7,7 @@ from .security import verify_api_key
 from .ratelimit import limiter
 from .logger import log_consulta
 from .blocklist import check_ip
+from .blocklist import check_ip_key
 import os
 
 router = APIRouter()
@@ -22,9 +23,11 @@ class Consulta(BaseModel):
 @limiter.limit("5/minute")
 def consultar(request: Request, data: Consulta):
     ip = request.client.host
+    api_key = request.state.api_key
+
 
     # 🛑 BLOQUEO PROGRESIVO
-    allowed, wait = check_ip(ip)
+    allowed, wait = check_ip_key(ip, api_key)
     if not allowed:
         raise HTTPException(
             status_code=429,
