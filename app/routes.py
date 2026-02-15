@@ -56,7 +56,9 @@ def consultar(request: Request, data: Consulta):
 
     # 🔒 GUARDRAIL JSON ESTRICTO (ANTI-DERIVA)
     text = response.text.strip()
-
+    print(text)
+    print("-----------------")
+    print(response.text.strip())
     if not text.startswith("{") or not text.endswith("}"):
         raise HTTPException(
             status_code=502,
