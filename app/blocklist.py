@@ -4,7 +4,7 @@ import time
 BLOCKS = {}
 
 # Configuración
-MAX_REQUESTS = 5          # intentos antes de castigo
+MAX_REQUESTS = 2          # intentos antes de castigo
 WINDOW_SECONDS = 60       # ventana de conteo
 BLOCK_TIME = 300          # 5 minutos
 
