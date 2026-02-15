@@ -6,6 +6,7 @@ from .cache import get_cache, MODEL_NAME
 from .security import verify_api_key
 from .ratelimit import limiter
 from .logger import log_consulta
+from .blocklist import check_ip
 import os
 
 router = APIRouter()
@@ -20,8 +21,17 @@ class Consulta(BaseModel):
 @router.post("/consultar", dependencies=[Depends(verify_api_key)])
 @limiter.limit("5/minute")
 def consultar(request: Request, data: Consulta):
-    cache = get_cache()
+    ip = request.client.host
 
+    # 🛑 BLOQUEO PROGRESIVO
+    allowed, wait = check_ip(ip)
+    if not allowed:
+        raise HTTPException(
+            status_code=429,
+            detail=f"IP bloqueada temporalmente. Intenta de nuevo en {wait} segundos."
+        )
+
+    cache = get_cache()
     if not cache:
         raise HTTPException(
             status_code=503,
@@ -29,7 +39,7 @@ def consultar(request: Request, data: Consulta):
         )
 
     # 📊 LOG DEFENSIVO
-    log_consulta(request.client.host, data.pregunta)
+    log_consulta(ip, data.pregunta)
 
     response = client.models.generate_content(
         model=MODEL_NAME,
