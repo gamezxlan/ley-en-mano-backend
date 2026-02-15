@@ -2,5 +2,4 @@ fastapi
 uvicorn
 google-genai
 python-dotenv
-lem_8f2a9c2f9c2e4d1b
 slowapi
