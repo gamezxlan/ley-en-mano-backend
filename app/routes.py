@@ -7,6 +7,7 @@ from .security import verify_api_key
 from .ratelimit import limiter
 from .logger import log_consulta
 from .blocklist import check_ip_key
+from .antibot import verify_antibot
 import os
 
 router = APIRouter()
@@ -19,7 +20,7 @@ class Consulta(BaseModel):
     pregunta: str
 
 
-@router.post("/consultar", dependencies=[Depends(verify_api_key)])
+@router.post("/consultar", dependencies=[Depends(verify_api_key), Depends(verify_antibot)])
 @limiter.limit("5/minute")
 def consultar(request: Request, data: Consulta):
     ip = request.client.host
@@ -56,9 +57,7 @@ def consultar(request: Request, data: Consulta):
 
     # 🔒 GUARDRAIL JSON ESTRICTO (ANTI-DERIVA)
     text = response.text.strip()
-    print(text)
-    print("-----------------")
-    print(response.text.strip())
+
     if not text.startswith("{") or not text.endswith("}"):
         if not text.startswith("```json") or not text.endswith("```"):
             raise HTTPException(
