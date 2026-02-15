@@ -37,7 +37,7 @@ def consultar(request: Request, data: Consulta):
     if not cache:
         raise HTTPException(
             status_code=503,
-            detail="Sistema legal no inicializado aún"
+            detail="Sistema legal no disponible. Intenta nuevamente en unos minutos."
         )
 
     # 📊 LOG DEFENSIVO

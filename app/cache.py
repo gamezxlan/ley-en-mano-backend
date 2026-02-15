@@ -1,4 +1,5 @@
 import os
+import time
 from google import genai
 from google.genai import types
 
@@ -9,6 +10,8 @@ client = genai.Client(
 )
 
 cache = None
+cache_created_at = 0
+CACHE_TTL_SECONDS = 3600  # ⬅️ 1 hora (recomendado)
 
 
 def load_files():
@@ -25,7 +28,7 @@ def load_files():
 
 
 def create_cache():
-    global cache
+    global cache, cache_created_at
 
     leyes, instruction = load_files()
 
@@ -42,17 +45,30 @@ def create_cache():
             system_instruction=[
                 types.Part(text=instruction)
             ],
-            ttl="900s",
+            ttl=f"{CACHE_TTL_SECONDS}s",
         ),
     )
 
     print("========================================")
     print("¡CACHE LEGAL CARGADO!")
     print("CACHE ID:", cache.name)
+    print("TTL:", CACHE_TTL_SECONDS, "segundos")
     print("========================================")
 
     return cache
 
 
 def get_cache():
+    global cache, cache_created_at
+
+    now = time.time()
+
+    # ❌ Cache inexistente
+    if cache is None:
+        return create_cache()
+
+    # ❌ Cache expirado
+    if now - cache_created_at > CACHE_TTL_SECONDS:
+        print("⚠️ Cache expirado, recreando...")
+        return create_cache()
     return cache
