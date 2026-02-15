@@ -54,6 +54,15 @@ def consultar(request: Request, data: Consulta):
         )
     )
 
+    # 🔒 GUARDRAIL JSON ESTRICTO (ANTI-DERIVA)
+    text = response.text.strip()
+
+    if not text.startswith("{") or not text.endswith("}"):
+        raise HTTPException(
+            status_code=502,
+            detail="Respuesta legal inválida. Reintenta."
+        )
+
     return {
-        "respuesta": response.text
+        "respuesta": text
     }
