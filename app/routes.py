@@ -6,7 +6,6 @@ from .cache import get_cache, MODEL_NAME
 from .security import verify_api_key
 from .ratelimit import limiter
 from .logger import log_consulta
-from .blocklist import check_ip
 from .blocklist import check_ip_key
 import os
 
