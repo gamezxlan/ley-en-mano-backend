@@ -2,10 +2,13 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from google import genai
 from .cache import get_cache
-from .gemini import MODEL_NAME
+from .cache import MODEL_NAME
 
 router = APIRouter()
-client = genai.Client()
+
+client = genai.Client(
+    api_key=os.environ["GOOGLE_API_KEY"]
+)
 
 
 class Consulta(BaseModel):
@@ -22,11 +25,17 @@ def consultar(data: Consulta):
             detail="Sistema legal no inicializado aún"
         )
 
-    model = client.models.get(
+    response = client.models.generate_content(
         model=MODEL_NAME,
-        cached_content=cache.name
+        cached_content=cache.name,  # ✅ AQUÍ VA EL CACHÉ
+        contents=[
+            {
+                "role": "user",
+                "parts": [{"text": data.pregunta}]
+            }
+        ]
     )
 
-    response = model.generate_content(data.pregunta)
-
-    return response.text
+    return {
+        "respuesta": response.text
+    }

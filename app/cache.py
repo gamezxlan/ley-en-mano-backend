@@ -2,9 +2,11 @@ import os
 from google import genai
 from google.genai import types
 
-MODEL_NAME = "gemini-2.5-flash"
+MODEL_NAME = "models/gemini-2.5-flash"
 
-client = genai.Client()
+client = genai.Client(
+    api_key=os.environ["GOOGLE_API_KEY"]
+)
 
 cache = None
 
@@ -37,7 +39,9 @@ def create_cache():
                     parts=[types.Part(text=leyes)]
                 )
             ],
-            system_instruction=[types.Part(text=instruction)],
+            system_instruction=[
+                types.Part(text=instruction)
+            ],
             ttl="900s",
         ),
     )
