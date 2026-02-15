@@ -1,8 +1,9 @@
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
 from google import genai
 from google.genai import types
 from .cache import get_cache, MODEL_NAME
+from .security import verify_api_key
 import os
 
 router = APIRouter()
@@ -16,7 +17,7 @@ class Consulta(BaseModel):
     pregunta: str
 
 
-@router.post("/consultar")
+@router.post("/consultar", dependencies=[Depends(verify_api_key)])
 def consultar(data: Consulta):
     cache = get_cache()
 
