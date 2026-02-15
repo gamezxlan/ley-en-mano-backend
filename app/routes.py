@@ -3,6 +3,7 @@ from pydantic import BaseModel
 from google import genai
 from .cache import get_cache
 from .cache import MODEL_NAME
+import os
 
 router = APIRouter()
 
