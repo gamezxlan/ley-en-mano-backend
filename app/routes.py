@@ -60,10 +60,11 @@ def consultar(request: Request, data: Consulta):
     print("-----------------")
     print(response.text.strip())
     if not text.startswith("{") or not text.endswith("}"):
-        raise HTTPException(
-            status_code=502,
-            detail="Respuesta legal inválida. Reintenta."
-        )
+        if not text.startswith("```json") or not text.endswith("```"):
+            raise HTTPException(
+                status_code=502,
+                detail="Respuesta legal inválida. Reintenta."
+            )
 
     return {
         "respuesta": text
