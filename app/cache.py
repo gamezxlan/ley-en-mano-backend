@@ -2,16 +2,13 @@ import os
 import time
 from google import genai
 from google.genai import types
+from .cache_global import LEGAL_CACHE
 
 MODEL_NAME = "models/gemini-2.5-flash"
 
 client = genai.Client(
     api_key=os.environ["GOOGLE_API_KEY"]
 )
-
-cache = None
-cache_created_at = 0
-CACHE_TTL_SECONDS = 3600  # ⬅️ 1 hora (recomendado)
 
 
 def load_files():
@@ -28,8 +25,6 @@ def load_files():
 
 
 def create_cache():
-    global cache, cache_created_at
-
     leyes, instruction = load_files()
 
     cache = client.caches.create(
@@ -45,30 +40,31 @@ def create_cache():
             system_instruction=[
                 types.Part(text=instruction)
             ],
-            ttl=f"{CACHE_TTL_SECONDS}s",
+            ttl=f"{LEGAL_CACHE['ttl']}s",
         ),
     )
+
+    LEGAL_CACHE["cache"] = cache
+    LEGAL_CACHE["created_at"] = time.time()
 
     print("========================================")
     print("¡CACHE LEGAL CARGADO!")
     print("CACHE ID:", cache.name)
-    print("TTL:", CACHE_TTL_SECONDS, "segundos")
+    print("TTL:", LEGAL_CACHE["ttl"], "segundos")
     print("========================================")
 
     return cache
 
 
 def get_cache():
-    global cache, cache_created_at
-
     now = time.time()
 
-    # ❌ Cache inexistente
-    if cache is None:
+    if LEGAL_CACHE["cache"] is None:
+        print("⚠️ Cache inexistente, creando...")
         return create_cache()
 
-    # ❌ Cache expirado
-    if now - cache_created_at > CACHE_TTL_SECONDS:
+    if now - LEGAL_CACHE["created_at"] > LEGAL_CACHE["ttl"]:
         print("⚠️ Cache expirado, recreando...")
         return create_cache()
-    return cache
+
+    return LEGAL_CACHE["cache"]

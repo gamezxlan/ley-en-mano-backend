@@ -18,14 +18,13 @@ client = genai.Client(
 class Consulta(BaseModel):
     pregunta: str
 
+
 @router.post("/consultar", dependencies=[Depends(verify_api_key)])
 @limiter.limit("5/minute")
 def consultar(request: Request, data: Consulta):
     ip = request.client.host
     api_key = request.state.api_key
 
-
-    # 🛑 BLOQUEO PROGRESIVO
     allowed, wait = check_ip_key(ip, api_key)
     if not allowed:
         raise HTTPException(
@@ -40,7 +39,6 @@ def consultar(request: Request, data: Consulta):
             detail="Sistema legal no disponible. Intenta nuevamente en unos minutos."
         )
 
-    # 📊 LOG DEFENSIVO
     log_consulta(ip, data.pregunta)
 
     response = client.models.generate_content(
