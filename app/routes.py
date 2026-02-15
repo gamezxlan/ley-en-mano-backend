@@ -1,8 +1,8 @@
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from google import genai
-from .cache import get_cache
-from .cache import MODEL_NAME
+from google.genai import types
+from .cache import get_cache, MODEL_NAME
 import os
 
 router = APIRouter()
@@ -28,13 +28,15 @@ def consultar(data: Consulta):
 
     response = client.models.generate_content(
         model=MODEL_NAME,
-        cached_content=cache.name,  # ✅ AQUÍ VA EL CACHÉ
         contents=[
-            {
-                "role": "user",
-                "parts": [{"text": data.pregunta}]
-            }
-        ]
+            types.Content(
+                role="user",
+                parts=[types.Part(text=data.pregunta)]
+            )
+        ],
+        config=types.GenerateContentConfig(
+            cached_content=cache.name
+        )
     )
 
     return {
