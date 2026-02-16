@@ -54,7 +54,7 @@ def consultar(request: Request, data: Consulta):
             cached_content=cache.name
         )
     )
-
+    print(cache.name)
     # 🔒 GUARDRAIL JSON ESTRICTO (ANTI-DERIVA)
     text = response.text.strip()
 
