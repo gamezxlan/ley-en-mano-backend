@@ -20,7 +20,7 @@ class Consulta(BaseModel):
     pregunta: str
 
 
-@router.post("/consultar", dependencies=[Depends(verify_api_key), Depends(verify_antibot)])
+@router.post("/consultar", dependencies=[Depends(verify_api_key)])
 @limiter.limit("5/minute")
 def consultar(request: Request, data: Consulta):
     ip = request.client.host
