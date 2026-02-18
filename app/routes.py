@@ -9,6 +9,7 @@ from .logger import log_consulta
 from .blocklist import check_ip_visitor
 from .antibot import verify_antibot
 from .ip_utils import get_client_ip
+from pydantic import BaseModel, field_validator
 import os
 
 router = APIRouter()
@@ -21,6 +22,10 @@ class Consulta(BaseModel):
     pregunta: str
     visitor_id: str
 
+@field_validator("visitor_id")
+@classmethod
+def visitor_id_to_str(cls, v):
+    return str(v).strip()
 
 @router.post("/consultar", dependencies=[Depends(verify_api_key)])
 @limiter.limit("5/minute")
