@@ -6,7 +6,7 @@ from .cache import get_cache, MODEL_NAME
 from .security import verify_api_key
 from .ratelimit import limiter
 from .logger import log_consulta
-from .blocklist import check_ip_key
+from .blocklist import check_ip_visitor
 from .antibot import verify_antibot
 from .ip_utils import get_client_ip
 import os
@@ -26,7 +26,6 @@ class Consulta(BaseModel):
 @limiter.limit("5/minute")
 def consultar(request: Request, data: Consulta):
     ip = get_client_ip(request)
-    api_key = request.state.api_key
 
     if len(data.visitor_id) < 6 or len(data.visitor_id) > 80:
         raise HTTPException(status_code=400, detail="visitor_id inválido")
