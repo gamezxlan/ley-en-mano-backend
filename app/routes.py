@@ -8,6 +8,7 @@ from .ratelimit import limiter
 from .logger import log_consulta
 from .blocklist import check_ip_key
 from .antibot import verify_antibot
+from .ip_utils import get_client_ip
 import os
 
 router = APIRouter()
@@ -18,15 +19,19 @@ client = genai.Client(
 
 class Consulta(BaseModel):
     pregunta: str
+    visitor_id: str
 
 
 @router.post("/consultar", dependencies=[Depends(verify_api_key)])
 @limiter.limit("5/minute")
 def consultar(request: Request, data: Consulta):
-    ip = request.client.host
+    ip = get_client_ip(request)
     api_key = request.state.api_key
 
-    allowed, wait = check_ip_key(ip, api_key)
+    if len(data.visitor_id) < 6 or len(data.visitor_id) > 80:
+        raise HTTPException(status_code=400, detail="visitor_id inválido")
+
+    allowed, wait = check_ip_visitor(ip, data.visitor_id)
     if not allowed:
         raise HTTPException(
             status_code=429,
@@ -40,7 +45,7 @@ def consultar(request: Request, data: Consulta):
             detail="Sistema legal no disponible. Intenta nuevamente en unos minutos."
         )
 
-    log_consulta(ip, data.pregunta)
+    log_consulta(ip, data.visitor_id, data.pregunta)
 
     response = client.models.generate_content(
         model=MODEL_NAME,

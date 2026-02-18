@@ -17,8 +17,8 @@ WINDOW_SECONDS = 120
 BLOCK_TIME = 300  # 5 minutos
 
 
-def _hash_key(api_key: str) -> str:
-    return hashlib.sha256(api_key.encode()).hexdigest()[:12]
+def _hash_key(value: str) -> str:
+    return hashlib.sha256(value.encode()).hexdigest()[:12]
 
 
 def _load_blocks():
@@ -36,10 +36,10 @@ def _save_blocks(data):
         json.dump(data, f)
 
 
-def check_ip_key(ip: str, api_key: str):
+def check_ip_visitor(ip: str, visitor_id: str):
     now = time.time()
-    key_hash = _hash_key(api_key)
-    identity = f"{ip}::{key_hash}"
+    vhash = _hash_key(visitor_id)
+    identity = f"{ip}::{vhash}"
 
     with LOCK:
         blocks = _load_blocks()
