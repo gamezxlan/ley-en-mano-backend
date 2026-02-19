@@ -6,7 +6,7 @@ from slowapi.middleware import SlowAPIMiddleware
 from slowapi import _rate_limit_exceeded_handler
 from .ratelimit import limiter
 from .routes import router
-from .cache import create_cache
+from .cache import create_caches
 
 ENV = os.getenv("ENV", "development")
 
@@ -33,8 +33,7 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=[
-        "Content-Type",
-        "X-API-Key"
+        "Content-Type"
     ],
 )
 
@@ -50,7 +49,7 @@ app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 # ===============================
 @app.on_event("startup")
 def startup():
-    create_cache()
+    create_caches()
 
 # ===============================
 # 🚦 ROUTES
