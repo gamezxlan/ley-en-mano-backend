@@ -319,6 +319,7 @@ def consultar(request: Request, data: Consulta):
             ],
             config=types.GenerateContentConfig(cached_content=cache.name),
         )
+        print(cache)
     except Exception as e:
         insert_usage_event(
             visitor_id=data.visitor_id,
