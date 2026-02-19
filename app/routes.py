@@ -248,6 +248,7 @@ def enforce_profile_shape_legacy(obj: dict, profile: str) -> dict:
 
         # Si por error el modelo puso null, lo dejamos como viene, pero idealmente debe ser objeto.
         # (Si quieres strict: si viene null => 502)
+        # comment
 
     else:
         # premium: no recortamos; si no aplica FE/teléfono, puede ser null.
