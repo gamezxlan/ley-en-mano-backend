@@ -79,14 +79,14 @@ SCHEMA ESTRICTO:
   "Fundamento Táctico": null,
   "Ruta de Blindaje": {
     "paso_1_inmediato": [
-      {"titulo":"string","accion":"string","que_decir":"string"}
+      {"titulo":"string","accion":"string"}
     ],
     "paso_2_discurso": {
       "que_no_decir": ["string"],
       "que_si_decir": ["string"]
     },
     "paso_3_denuncia": [
-      {"titulo":"string","accion":"string","que_decir":"string"}
+      {"titulo":"string","accion":"string"}
     ]
   },
   "Formato de Emergencia": null,
@@ -94,6 +94,8 @@ SCHEMA ESTRICTO:
 }
 REGLAS:
 - En paso_1_inmediato: máximo 1 card (1 objeto en la lista).
+- En paso_2_discurso.que_no_decir: máximo 1 card (1 objeto en la lista).
+- En paso_2_discurso.que_si_decir: máximo 1 card (1 objeto en la lista).
 - En paso_3_denuncia: máximo 1 card (1 objeto en la lista).
 - Mantén paso_2_discurso con listas cortas (2–5 frases).
 """
@@ -111,14 +113,14 @@ SCHEMA ESTRICTO:
   "Fundamento Táctico": null,
   "Ruta de Blindaje": {
     "paso_1_inmediato": [
-      {"titulo":"string","accion":"string","que_decir":"string"}
+      {"titulo":"string","accion":"string"}
     ],
     "paso_2_discurso": {
       "que_no_decir": ["string"],
       "que_si_decir": ["string"]
     },
     "paso_3_denuncia": [
-      {"titulo":"string","accion":"string","que_decir":"string"}
+      {"titulo":"string","accion":"string"}
     ]
   },
   "Formato de Emergencia": null,
@@ -126,8 +128,11 @@ SCHEMA ESTRICTO:
 }
 REGLAS:
 - Diagnóstico Jurídico NO puede ser null.
-- En paso_1_inmediato: máximo 1 card.
-- En paso_3_denuncia: máximo 1 card.
+- En paso_1_inmediato: máximo 1 card (1 objeto en la lista).
+- En paso_2_discurso.que_no_decir: máximo 1 card (1 objeto en la lista).
+- En paso_2_discurso.que_si_decir: máximo 1 card (1 objeto en la lista).
+- En paso_3_denuncia: máximo 1 card (1 objeto en la lista).
+- Mantén paso_2_discurso con listas cortas (2–5 frases).
 """
 
     # premium
@@ -144,14 +149,14 @@ SCHEMA ESTRICTO:
   ],
   "Ruta de Blindaje": {
     "paso_1_inmediato": [
-      {"titulo":"string","accion":"string","que_decir":"string","riesgo_si_no_haces":"string"}
+      {"titulo":"string","accion":"string","que_decir":"string"}
     ],
     "paso_2_discurso": {
       "que_no_decir": ["string"],
       "que_si_decir": ["string"]
     },
     "paso_3_denuncia": [
-      {"titulo":"string","accion":"string","que_decir":"string","riesgo_si_no_haces":"string"}
+      {"titulo":"string","accion":"string","que_decir":"string"}
     ],
     "paso_4_adicional": [
       {"titulo":"string","accion":"string","que_decir":"string"}
@@ -163,11 +168,13 @@ SCHEMA ESTRICTO:
     "campos": ["string"]
   },
   "Teléfono de contacto": [
-    {"Institucion":"string","contacto":"string"}
+    {"Institucion":"string","contacto":"string","mision":"string"}
   ]
 }
 REGLAS:
 - Debes incluir SIEMPRE paso_1_inmediato, paso_2_discurso, paso_3_denuncia.
+- En paso_1_inmediato: puedes agregar mas acciones en la lista cuando sea necesario.
+- En paso_3_denuncia: puedes agregar mas denuncias en la lista cuando sea necesario.
 - Puedes agregar paso_4_adicional, paso_5_adicional, etc. cuando sea necesario.
 - Si no aplica Formato de Emergencia o Teléfono, usa null (no inventar).
 """
