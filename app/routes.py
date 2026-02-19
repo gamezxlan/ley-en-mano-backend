@@ -255,19 +255,23 @@ def consultar(request: Request, data: Consulta):
 
     overlay = _policy_overlay_text(pol)
 
+        def _call_gemini(user_contents):
+        return client.models.generate_content(
+            model=model_name,
+            contents=user_contents,
+            config=types.GenerateContentConfig(cached_content=cache.name),
+        )
+
     # IMPORTANTE:
     # Con cached_content, evitamos pasar system_instruction en el request.
     # Mandamos el POLICY como primer mensaje user.
+# 1) intento normal
     try:
-        response = client.models.generate_content(
-            model=model_name,
-            contents=[
+        response = _call_gemini(
+            [
                 types.Content(role="user", parts=[types.Part(text=overlay)]),
                 types.Content(role="user", parts=[types.Part(text=data.pregunta.strip())]),
-            ],
-            config=types.GenerateContentConfig(
-                cached_content=cache.name
-            ),
+            ]
         )
     except Exception as e:
         insert_usage_event(
@@ -284,8 +288,45 @@ def consultar(request: Request, data: Consulta):
 
     text = (response.text or "").strip()
 
-    # Guardrail JSON ESTRICTO (NO aceptamos ```json)
-    if not text.startswith("{") or not text.endswith("}"):
+    def _is_pure_json(s: str) -> bool:
+        return s.startswith("{") and s.endswith("}")
+
+    # 2) retry de reformateo si viene con ``` o texto extra
+    if not _is_pure_json(text):
+        reformat_overlay = (
+            "EMERGENCIA FORMATO:\n"
+            "Debes responder ÚNICAMENTE con un objeto JSON puro.\n"
+            "PROHIBIDO usar ``` o ```json.\n"
+            "No escribas ninguna explicación.\n"
+            "Toma el contenido de la respuesta previa y devuélvelo SOLO como JSON.\n"
+        )
+
+        try:
+            response2 = _call_gemini(
+                [
+                    types.Content(role="user", parts=[types.Part(text=overlay)]),
+                    types.Content(role="user", parts=[types.Part(text=reformat_overlay)]),
+                    types.Content(role="user", parts=[types.Part(text=text)]),
+                ]
+            )
+            text2 = (response2.text or "").strip()
+            text = text2
+        except Exception as e:
+            insert_usage_event(
+                visitor_id=data.visitor_id,
+                user_id=data.user_id,
+                profile=pol.profile,
+                plan_code=pol.plan_code,
+                model_used="flash" if pol.model_kind == "flash" else "flash-lite",
+                endpoint="/consultar",
+                allowed=False,
+                reason=f"gemini_reformat_error:{type(e).__name__}:{str(e)[:180]}",
+            )
+            raise HTTPException(status_code=502, detail="Respuesta legal inválida. Reintenta.")
+
+    # Guardrail JSON ESTRICTO (después del retry)
+    if not _is_pure_json(text):
+        bad_snip = text[:240].replace("\n", "\\n")
         insert_usage_event(
             visitor_id=data.visitor_id,
             user_id=data.user_id,
@@ -294,7 +335,7 @@ def consultar(request: Request, data: Consulta):
             model_used="flash" if pol.model_kind == "flash" else "flash-lite",
             endpoint="/consultar",
             allowed=False,
-            reason="invalid_json_envelope",
+            reason=f"invalid_json_envelope:{bad_snip}",
         )
         raise HTTPException(status_code=502, detail="Respuesta legal inválida. Reintenta.")
 
