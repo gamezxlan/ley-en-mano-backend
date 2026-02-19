@@ -172,13 +172,88 @@ REGLAS:
 - Si no aplica Formato de Emergencia o Teléfono, usa null (no inventar).
 """
 
+LEGACY_KEYS = {
+    "diagnostico": "Diagnóstico Jurídico",
+    "fundamento_tactico": "Fundamento Táctico",
+    "ruta_blindaje": "Ruta de Blindaje",
+    "formato_emergencia": "Formato de Emergencia",
+    "telefono_contacto": "Teléfono de contacto",
+}
 
-def _limit_cards_to_one(o: dict):
-    rb = o.get("ruta_blindaje")
-    if isinstance(rb, list):
-        for step in rb:
-            if isinstance(step, dict) and isinstance(step.get("cards"), list):
-                step["cards"] = step["cards"][:1]
+def _drop_lowercase_keys_if_present(obj: dict) -> None:
+    # por si el modelo mete llaves nuevas (minúsculas) las quitamos
+    for k in ["diagnostico", "fundamento_tactico", "ruta_blindaje", "formato_emergencia", "telefono_contacto"]:
+        if k in obj:
+            obj.pop(k, None)
+
+def _limit_legacy_cards_guest_free(obj: dict) -> None:
+    """
+    guest/free: 1 card en paso_1_inmediato y 1 card en paso_3_denuncia
+    paso_2_discurso: listas cortas (no recortamos aquí, solo respetamos lo que venga)
+    """
+    rb = obj.get("Ruta de Blindaje")
+    if not isinstance(rb, dict):
+        return
+
+    p1 = rb.get("paso_1_inmediato")
+    if isinstance(p1, list):
+        rb["paso_1_inmediato"] = p1[:1]
+
+    p3 = rb.get("paso_3_denuncia")
+    if isinstance(p3, list):
+        rb["paso_3_denuncia"] = p3[:1]
+
+def enforce_profile_shape_legacy(obj: dict, profile: str) -> dict:
+    """
+    Contrato FINAL:
+    guest:
+      Diagnóstico Jurídico = null
+      Fundamento Táctico = null
+      Ruta de Blindaje = 3 pasos (objeto con paso_1, paso_2, paso_3)
+      Formato de Emergencia = null
+      Teléfono de contacto = null
+
+    free:
+      Diagnóstico Jurídico = objeto
+      Fundamento Táctico = null
+      Ruta de Blindaje = 3 pasos
+      Formato de Emergencia = null
+      Teléfono de contacto = null
+
+    premium:
+      todo puede ir (según aplique). No recortamos.
+    """
+
+    # 0) si viene algo en minúsculas, lo eliminamos para no mezclar contratos
+    _drop_lowercase_keys_if_present(obj)
+
+    # 1) Asegurar que existan las llaves legacy (si faltan, se crean)
+    for k in ["Diagnóstico Jurídico", "Fundamento Táctico", "Ruta de Blindaje", "Formato de Emergencia", "Teléfono de contacto"]:
+        if k not in obj:
+            obj[k] = None
+
+    # 2) Forzado por perfil
+    if profile == "guest":
+        obj["Diagnóstico Jurídico"] = None
+        obj["Fundamento Táctico"] = None
+        obj["Formato de Emergencia"] = None
+        obj["Teléfono de contacto"] = None
+        _limit_legacy_cards_guest_free(obj)
+
+    elif profile == "free":
+        obj["Fundamento Táctico"] = None
+        obj["Formato de Emergencia"] = None
+        obj["Teléfono de contacto"] = None
+        _limit_legacy_cards_guest_free(obj)
+
+        # Si por error el modelo puso null, lo dejamos como viene, pero idealmente debe ser objeto.
+        # (Si quieres strict: si viene null => 502)
+
+    else:
+        # premium: no recortamos; si no aplica FE/teléfono, puede ser null.
+        pass
+
+    return obj
 
 
 def _strip_code_fences(s: str) -> str:
@@ -214,32 +289,6 @@ def normalize_model_output_to_json(text: str) -> str | None:
     if t.startswith("{") and t.endswith("}"):
         return t
     return _extract_first_json_object(t)
-
-
-def enforce_profile_shape(obj: dict, profile: str) -> dict:
-    # asegurar llaves base
-    for k in ["diagnostico", "fundamento_tactico", "ruta_blindaje", "formato_emergencia", "telefono_contacto"]:
-        if k not in obj:
-            obj[k] = None
-
-    if profile == "guest":
-        obj["diagnostico"] = None
-        obj["fundamento_tactico"] = None
-        obj["formato_emergencia"] = None
-        obj["telefono_contacto"] = None
-        _limit_cards_to_one(obj)
-
-    elif profile == "free":
-        obj["fundamento_tactico"] = None
-        obj["formato_emergencia"] = None
-        obj["telefono_contacto"] = None
-        _limit_cards_to_one(obj)
-
-    else:
-        # premium: no recorte
-        pass
-
-    return obj
 
 
 @router.post("/policy")
@@ -373,7 +422,7 @@ def consultar(request: Request, data: Consulta):
         )
         raise HTTPException(status_code=502, detail="Respuesta legal inválida. Reintenta.")
 
-    obj = enforce_profile_shape(obj, pol.profile)
+    obj = enforce_profile_shape_legacy(obj, pol.profile)
 
     insert_usage_event(
         visitor_id=data.visitor_id,
