@@ -371,11 +371,11 @@ def consultar(request: Request, data: Consulta):
         response = client.models.generate_content(
             model=model_name,
             contents=[
+                types.Content(role="user", parts=[types.Part(text=overlay)]),
                 types.Content(role="user", parts=[types.Part(text=data.pregunta.strip())]),
             ],
             config=types.GenerateContentConfig(
-                cached_content=cache.name,
-                system_instruction=[types.Part(text=overlay)],
+                cached_content=cache.name
             ),
         )
     except Exception as e:
