@@ -8,6 +8,7 @@ from .blocklist import check_ip_visitor
 from .ip_utils import get_client_ip
 from .usage_repo import upsert_visitor, insert_usage_event
 from .policy_service import build_policy
+from .usage_repo import ensure_user
 import os
 
 router = APIRouter()
@@ -86,11 +87,6 @@ def _policy_overlay_text(policy):
 def policy(request: Request, data: PolicyRequest):
     ip = get_client_ip(request)
     _validate_visitor_id(data.visitor_id)
-
-    # anti-spam corto (minutos) por IP+visitor
-    allowed, wait = check_ip_visitor(ip, data.visitor_id)
-    if not allowed:
-        raise HTTPException(status_code=429, detail=f"Bloqueado temporalmente. Intenta de nuevo en {wait}s.")
 
     # upsert visitor
     upsert_visitor(data.visitor_id, data.user_id)

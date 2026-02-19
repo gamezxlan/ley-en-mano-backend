@@ -156,3 +156,17 @@ def insert_usage_event(
                  endpoint, allowed, reason)
             )
         conn.commit()
+
+
+def ensure_user(user_id: str):
+    with pool.connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO users(user_id, email, created_at)
+                VALUES (%s, NULL, NOW())
+                ON CONFLICT (user_id) DO NOTHING
+                """,
+                (user_id,)
+            )
+        conn.commit()

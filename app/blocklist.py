@@ -12,9 +12,9 @@ BLOCK_FILE = os.environ.get(
 LOCK = Lock()
 
 # Configuración
-MAX_REQUESTS = 2
-WINDOW_SECONDS = 120
-BLOCK_TIME = 300  # 5 minutos
+MAX_REQUESTS = 30
+WINDOW_SECONDS = 300
+BLOCK_TIME = 900  # 15 minutos
 
 
 def _hash_key(value: str) -> str:
