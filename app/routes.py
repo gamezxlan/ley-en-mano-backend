@@ -60,26 +60,117 @@ def _validate_visitor_id(visitor_id: str):
 
 
 def _policy_overlay_text(policy):
-    # Mensaje corto (no cacheado) para controlar salida/cantidad de cards
-    # OJO: tu system_instruction debe exigir JSON estricto siempre.
-    return (
-        "POLICY:\n"
-        f"- profile: {policy.profile}\n"
-        f"- response_mode: {policy.response_mode}\n"
-        f"- cards_per_step: {policy.cards_per_step}\n"
-        "OUTPUT:\n"
-        "Responde SIEMPRE en JSON estricto.\n"
-        "Estructura mínima:\n"
-        "{\n"
-        '  "diagnostico": {...} | null,\n'
-        '  "ruta_blindaje": [ { "paso": 1, "titulo": "...", "cards": [ ... ] } ]\n'
-        "}\n"
-        "Reglas:\n"
-        "- Si response_mode=blindaje_only => diagnostico=null.\n"
-        "- Si cards_per_step=1 => máximo 1 card por paso.\n"
-        "- Si cards_per_step=2 => máximo 2 cards por paso.\n"
-        "- Si cards_per_step=full => sin recorte.\n"
-    )
+    common_rules = """
+POLICY (OBLIGATORIA):
+- Responde en JSON PURO (sin ``` ni texto fuera del JSON).
+- Cita ley y artículo en cada fundamento.
+- Evita afirmar ilegalidad categórica si depende de prueba: usa "acto impugnable" / "podría constituir".
+"""
+
+    if policy.profile == "guest":
+        return common_rules + """
+MODO: GUEST
+- response_mode = blindaje_only
+- cards_per_step = 1
+JSON SCHEMA ESTRICTO:
+{
+  "diagnostico": null,
+  "fundamento_tactico": [
+    {"ley": "string", "articulo": "string", "sustento": "string"}
+  ],
+  "ruta_blindaje": [
+    {
+      "paso": 1,
+      "titulo": "string",
+      "cards": [
+        {
+          "titulo": "string",
+          "accion": "string",
+          "que_decir": "string"
+        }
+      ]
+    }
+  ]
+}
+REGLAS:
+- diagnostico SIEMPRE null.
+- En cada paso, cards máximo 1.
+- ruta_blindaje debe tener pasos numerados desde 1.
+"""
+
+    if policy.profile == "free":
+        return common_rules + """
+MODO: FREE (registrado sin plan)
+- response_mode = diagnostico_y_blindaje
+- cards_per_step = 2
+JSON SCHEMA ESTRICTO:
+{
+  "diagnostico": {
+    "resumen": "string",
+    "gravedad": "Alta|Media|Baja"
+  },
+  "fundamento_tactico": [
+    {"ley": "string", "articulo": "string", "sustento": "string"}
+  ],
+  "ruta_blindaje": [
+    {
+      "paso": 1,
+      "titulo": "string",
+      "cards": [
+        {
+          "titulo": "string",
+          "accion": "string",
+          "que_decir": "string"
+        }
+      ]
+    }
+  ]
+}
+REGLAS:
+- diagnostico NO puede ser null.
+- En cada paso, cards máximo 2.
+"""
+
+    # premium
+    return common_rules + """
+MODO: PREMIUM (plan activo)
+- response_mode = full
+- cards_per_step = full
+JSON SCHEMA ESTRICTO:
+{
+  "diagnostico": {
+    "resumen": "string",
+    "gravedad": "Alta|Media|Baja"
+  },
+  "fundamento_tactico": [
+    {"ley": "string", "articulo": "string", "sustento": "string"}
+  ],
+  "ruta_blindaje": [
+    {
+      "paso": 1,
+      "titulo": "string",
+      "cards": [
+        {
+          "titulo": "string",
+          "accion": "string",
+          "que_decir": "string",
+          "que_no_decir": "string",
+          "riesgo_si_no_haces": "string"
+        }
+      ]
+    }
+  ],
+  "formatos_sugeridos": [
+    {"tipo": "PROFECO|CONDUSEF|TRÁNSITO|COMAR|OTRO", "titulo": "string", "campos": ["string"]}
+  ],
+  "contactos": [
+    {"institucion": "string", "contacto": "string"}
+  ]
+}
+REGLAS:
+- Sin recorte de cards.
+- Si aplica, incluye formatos_sugeridos y contactos.
+"""
 
 
 @router.post("/policy")
@@ -175,7 +266,6 @@ def consultar(request: Request, data: Consulta):
 
     overlay = _policy_overlay_text(pol)
     contents = [
-        types.Content(role="user", parts=[types.Part(text=overlay)]),
         types.Content(role="user", parts=[types.Part(text=data.pregunta.strip())]),
     ]
 
@@ -183,7 +273,8 @@ def consultar(request: Request, data: Consulta):
         model=model_name,
         contents=contents,
         config=types.GenerateContentConfig(
-            cached_content=cache.name
+            cached_content=cache.name,
+            system_instruction=[types.Part(text=_policy_overlay_text(pol))]
         )
     )
 
