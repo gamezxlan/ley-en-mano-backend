@@ -63,106 +63,113 @@ def _policy_overlay_text(policy):
     common = """
 POLICY (OBLIGATORIA):
 - Responde en JSON PURO (sin ``` ni texto fuera del JSON).
-- NO inventes secciones fuera del schema.
-- Si una clave es null en el schema, debe ser null (no arreglo, no lista, no texto).
+- Respeta EXACTAMENTE el schema del perfil.
+- Si una clave es null en el schema, debe ser null (no lista, no texto).
+- La Ruta de Blindaje debe incluir SIEMPRE 3 pasos mínimos:
+  paso_1_inmediato, paso_2_discurso, paso_3_denuncia.
 """
 
     if policy.profile == "guest":
         return common + """
 PERFIL: GUEST
-LIMITES:
 - cards_per_step = 1
-JSON SCHEMA ESTRICTO:
+SCHEMA ESTRICTO:
 {
-  "diagnostico": null,
-  "fundamento_tactico": null,
-  "ruta_blindaje": [
-    {
-      "paso": 1,
-      "titulo": "string",
-      "cards": [
-        { "titulo": "string", "accion": "string", "que_decir": "string" }
-      ]
-    }
-  ],
-  "formato_emergencia": null,
-  "telefono_contacto": null
+  "Diagnóstico Jurídico": null,
+  "Fundamento Táctico": null,
+  "Ruta de Blindaje": {
+    "paso_1_inmediato": [
+      {"titulo":"string","accion":"string","que_decir":"string"}
+    ],
+    "paso_2_discurso": {
+      "que_no_decir": ["string"],
+      "que_si_decir": ["string"]
+    },
+    "paso_3_denuncia": [
+      {"titulo":"string","accion":"string","que_decir":"string"}
+    ]
+  },
+  "Formato de Emergencia": null,
+  "Teléfono de contacto": null
 }
 REGLAS:
-- diagnostico MUST be null
-- fundamento_tactico MUST be null
-- formato_emergencia MUST be null
-- telefono_contacto MUST be null
-- Máximo 1 card por paso.
+- En paso_1_inmediato: máximo 1 card (1 objeto en la lista).
+- En paso_3_denuncia: máximo 1 card (1 objeto en la lista).
+- Mantén paso_2_discurso con listas cortas (2–5 frases).
 """
 
     if policy.profile == "free":
         return common + """
-PERFIL: FREE (registrado sin plan)
-LIMITES:
+PERFIL: FREE
 - cards_per_step = 1
-JSON SCHEMA ESTRICTO:
+SCHEMA ESTRICTO:
 {
-  "diagnostico": {
-    "resumen": "string",
-    "gravedad": "Alta|Media|Baja"
+  "Diagnóstico Jurídico": {
+    "resumen":"string",
+    "gravedad":"Alta|Media|Baja"
   },
-  "fundamento_tactico": null,
-  "ruta_blindaje": [
-    {
-      "paso": 1,
-      "titulo": "string",
-      "cards": [
-        { "titulo": "string", "accion": "string", "que_decir": "string" }
-      ]
-    }
-  ],
-  "formato_emergencia": null,
-  "telefono_contacto": null
+  "Fundamento Táctico": null,
+  "Ruta de Blindaje": {
+    "paso_1_inmediato": [
+      {"titulo":"string","accion":"string","que_decir":"string"}
+    ],
+    "paso_2_discurso": {
+      "que_no_decir": ["string"],
+      "que_si_decir": ["string"]
+    },
+    "paso_3_denuncia": [
+      {"titulo":"string","accion":"string","que_decir":"string"}
+    ]
+  },
+  "Formato de Emergencia": null,
+  "Teléfono de contacto": null
 }
 REGLAS:
-- diagnostico NO puede ser null
-- fundamento_tactico MUST be null
-- formato_emergencia MUST be null
-- telefono_contacto MUST be null
-- Máximo 1 card por paso.
+- Diagnóstico Jurídico NO puede ser null.
+- En paso_1_inmediato: máximo 1 card.
+- En paso_3_denuncia: máximo 1 card.
 """
 
     # premium
     return common + """
-PERFIL: PREMIUM (plan activo)
-JSON SCHEMA ESTRICTO:
+PERFIL: PREMIUM
+SCHEMA ESTRICTO:
 {
-  "diagnostico": {
-    "resumen": "string",
-    "gravedad": "Alta|Media|Baja"
+  "Diagnóstico Jurídico": {
+    "resumen":"string",
+    "gravedad":"Alta|Media|Baja"
   },
-  "fundamento_tactico": [
+  "Fundamento Táctico": [
     {"ley":"string","articulo":"string","sustento":"string"}
   ],
-  "ruta_blindaje": [
-    {
-      "paso": 1,
-      "titulo": "string",
-      "cards": [
-        {
-          "titulo":"string",
-          "accion":"string",
-          "que_decir":"string",
-          "que_no_decir":"string",
-          "riesgo_si_no_haces":"string"
-        }
-      ]
-    }
-  ],
-  "formato_emergencia": null,
-  "telefono_contacto": null
+  "Ruta de Blindaje": {
+    "paso_1_inmediato": [
+      {"titulo":"string","accion":"string","que_decir":"string","riesgo_si_no_haces":"string"}
+    ],
+    "paso_2_discurso": {
+      "que_no_decir": ["string"],
+      "que_si_decir": ["string"]
+    },
+    "paso_3_denuncia": [
+      {"titulo":"string","accion":"string","que_decir":"string","riesgo_si_no_haces":"string"}
+    ],
+    "paso_4_adicional": [
+      {"titulo":"string","accion":"string","que_decir":"string"}
+    ]
+  },
+  "Formato de Emergencia": {
+    "disponible": true,
+    "titulo": "string",
+    "campos": ["string"]
+  },
+  "Teléfono de contacto": [
+    {"Institucion":"string","contacto":"string"}
+  ]
 }
 REGLAS:
-- ruta_blindaje debe tener 3+ pasos cuando el caso lo amerite.
-- Sin recorte de cards.
-- Incluir fundamento_tactico (no null).
-- formato_emergencia y telefono_contacto: si no aplica, null.
+- Debes incluir SIEMPRE paso_1_inmediato, paso_2_discurso, paso_3_denuncia.
+- Puedes agregar paso_4_adicional, paso_5_adicional, etc. cuando sea necesario.
+- Si no aplica Formato de Emergencia o Teléfono, usa null (no inventar).
 """
 
 

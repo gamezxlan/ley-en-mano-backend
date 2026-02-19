@@ -65,7 +65,7 @@ def build_policy(visitor_id: str, user_id: str | None) -> Policy:
             profile="free",
             model_kind="lite",
             response_mode="diagnostico_y_blindaje",
-            cards_per_step="2",
+            cards_per_step="1",
             daily_limit=limit,
             monthly_limit=None,
             remaining=remaining,
