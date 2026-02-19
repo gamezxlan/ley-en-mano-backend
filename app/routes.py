@@ -58,47 +58,6 @@ def _validate_visitor_id(visitor_id: str):
         raise HTTPException(status_code=400, detail="visitor_id inválido")
 
 
-def _strip_code_fences(s: str) -> str:
-    t = s.strip()
-    if t.startswith("```"):
-        # elimina primera línea ``` o ```json
-        first_nl = t.find("\n")
-        if first_nl != -1:
-            t = t[first_nl + 1 :]
-        # elimina cierre ```
-        if t.rstrip().endswith("```"):
-            t = t.rstrip()[:-3]
-    return t.strip()
-
-def _extract_first_json_object(s: str) -> str | None:
-    """
-    Extrae el primer objeto JSON {...} por balanceo de llaves.
-    No valida JSON a nivel de comillas, pero funciona bien si el modelo
-    metió texto extra antes/después.
-    """
-    start = s.find("{")
-    if start == -1:
-        return None
-
-    depth = 0
-    for i in range(start, len(s)):
-        ch = s[i]
-        if ch == "{":
-            depth += 1
-        elif ch == "}":
-            depth -= 1
-            if depth == 0:
-                return s[start : i + 1].strip()
-    return None
-
-def normalize_model_output_to_json(text: str) -> str | None:
-    t = (text or "").strip()
-    t = _strip_code_fences(t)
-    if t.startswith("{") and t.endswith("}"):
-        return t
-    return _extract_first_json_object(t)
-
-
 def _policy_overlay_text(policy):
     common_rules = """
 POLICY (OBLIGATORIA):
@@ -213,6 +172,41 @@ REGLAS:
 """
 
 
+def _strip_code_fences(s: str) -> str:
+    t = (s or "").strip()
+    if t.startswith("```"):
+        first_nl = t.find("\n")
+        if first_nl != -1:
+            t = t[first_nl + 1 :]
+        if t.rstrip().endswith("```"):
+            t = t.rstrip()[:-3]
+    return t.strip()
+
+
+def _extract_first_json_object(s: str) -> str | None:
+    start = s.find("{")
+    if start == -1:
+        return None
+    depth = 0
+    for i in range(start, len(s)):
+        ch = s[i]
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return s[start : i + 1].strip()
+    return None
+
+
+def normalize_model_output_to_json(text: str) -> str | None:
+    t = (text or "").strip()
+    t = _strip_code_fences(t)
+    if t.startswith("{") and t.endswith("}"):
+        return t
+    return _extract_first_json_object(t)
+
+
 @router.post("/policy")
 @limiter.limit("30/minute")
 def policy(request: Request, data: PolicyRequest):
@@ -246,7 +240,7 @@ def consultar(request: Request, data: Consulta):
     if data.user_id:
         ensure_user(data.user_id)
 
-    # anti-spam corto (minutos) por IP+visitor (NO cuotas)
+    # anti-spam corto (minutos)
     allowed, wait = check_ip_visitor(ip, data.visitor_id)
     if not allowed:
         insert_usage_event(
@@ -266,7 +260,6 @@ def consultar(request: Request, data: Consulta):
 
     upsert_visitor(data.visitor_id, data.user_id)
 
-    # policy + cuotas negocio (DB)
     pol = build_policy(data.visitor_id, data.user_id)
     if pol.remaining <= 0:
         insert_usage_event(
@@ -289,30 +282,22 @@ def consultar(request: Request, data: Consulta):
             },
         )
 
-    # Selección cache/modelo
     cache_kind = "flash" if pol.model_kind == "flash" else "lite"
     cache = get_cache(cache_kind)
     model_name = MODEL_FLASH if pol.model_kind == "flash" else MODEL_LITE
 
     overlay = _policy_overlay_text(pol)
 
-        def _call_gemini(user_contents):
-        return client.models.generate_content(
-            model=model_name,
-            contents=user_contents,
-            config=types.GenerateContentConfig(cached_content=cache.name),
-        )
-
-    # IMPORTANTE:
-    # Con cached_content, evitamos pasar system_instruction en el request.
-    # Mandamos el POLICY como primer mensaje user.
-# 1) intento normal
     try:
-        response = _call_gemini(
-            [
+        response = client.models.generate_content(
+            model=model_name,
+            contents=[
                 types.Content(role="user", parts=[types.Part(text=overlay)]),
                 types.Content(role="user", parts=[types.Part(text=data.pregunta.strip())]),
-            ]
+            ],
+            config=types.GenerateContentConfig(
+                cached_content=cache.name
+            ),
         )
     except Exception as e:
         insert_usage_event(
@@ -327,12 +312,9 @@ def consultar(request: Request, data: Consulta):
         )
         raise HTTPException(status_code=502, detail="IA no disponible. Reintenta.")
 
-    text = (response.text or "").strip()
-
     raw = (response.text or "").strip()
     normalized = normalize_model_output_to_json(raw)
 
-    # Guardrail JSON ESTRICTO (después del retry)
     if not normalized:
         bad_snip = raw[:240].replace("\n", "\\n")
         insert_usage_event(
@@ -347,8 +329,6 @@ def consultar(request: Request, data: Consulta):
         )
         raise HTTPException(status_code=502, detail="Respuesta legal inválida. Reintenta.")
 
-    text = normalized
-
     # Registrar uso OK (consumo 1 consulta)
     insert_usage_event(
         visitor_id=data.visitor_id,
@@ -361,12 +341,18 @@ def consultar(request: Request, data: Consulta):
         reason=None,
     )
 
-    return {
+    resp = {
         "visitor_id": data.visitor_id,
         "user_id": data.user_id,
         "profile": pol.profile,
         "plan_code": pol.plan_code,
         "remaining_after": max(0, pol.remaining - 1),
         "reset_at": pol.reset_at_iso,
-        "respuesta": text,
+        "respuesta": normalized,
     }
+
+    # Solo para debug no-prod (opcional)
+    if os.getenv("ENV") != "production":
+        resp["debug_raw"] = raw[:2000]
+
+    return resp
