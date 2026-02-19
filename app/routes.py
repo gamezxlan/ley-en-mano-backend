@@ -58,6 +58,47 @@ def _validate_visitor_id(visitor_id: str):
         raise HTTPException(status_code=400, detail="visitor_id inválido")
 
 
+def _strip_code_fences(s: str) -> str:
+    t = s.strip()
+    if t.startswith("```"):
+        # elimina primera línea ``` o ```json
+        first_nl = t.find("\n")
+        if first_nl != -1:
+            t = t[first_nl + 1 :]
+        # elimina cierre ```
+        if t.rstrip().endswith("```"):
+            t = t.rstrip()[:-3]
+    return t.strip()
+
+def _extract_first_json_object(s: str) -> str | None:
+    """
+    Extrae el primer objeto JSON {...} por balanceo de llaves.
+    No valida JSON a nivel de comillas, pero funciona bien si el modelo
+    metió texto extra antes/después.
+    """
+    start = s.find("{")
+    if start == -1:
+        return None
+
+    depth = 0
+    for i in range(start, len(s)):
+        ch = s[i]
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return s[start : i + 1].strip()
+    return None
+
+def normalize_model_output_to_json(text: str) -> str | None:
+    t = (text or "").strip()
+    t = _strip_code_fences(t)
+    if t.startswith("{") and t.endswith("}"):
+        return t
+    return _extract_first_json_object(t)
+
+
 def _policy_overlay_text(policy):
     common_rules = """
 POLICY (OBLIGATORIA):
@@ -288,45 +329,12 @@ def consultar(request: Request, data: Consulta):
 
     text = (response.text or "").strip()
 
-    def _is_pure_json(s: str) -> bool:
-        return s.startswith("{") and s.endswith("}")
-
-    # 2) retry de reformateo si viene con ``` o texto extra
-    if not _is_pure_json(text):
-        reformat_overlay = (
-            "EMERGENCIA FORMATO:\n"
-            "Debes responder ÚNICAMENTE con un objeto JSON puro.\n"
-            "PROHIBIDO usar ``` o ```json.\n"
-            "No escribas ninguna explicación.\n"
-            "Toma el contenido de la respuesta previa y devuélvelo SOLO como JSON.\n"
-        )
-
-        try:
-            response2 = _call_gemini(
-                [
-                    types.Content(role="user", parts=[types.Part(text=overlay)]),
-                    types.Content(role="user", parts=[types.Part(text=reformat_overlay)]),
-                    types.Content(role="user", parts=[types.Part(text=text)]),
-                ]
-            )
-            text2 = (response2.text or "").strip()
-            text = text2
-        except Exception as e:
-            insert_usage_event(
-                visitor_id=data.visitor_id,
-                user_id=data.user_id,
-                profile=pol.profile,
-                plan_code=pol.plan_code,
-                model_used="flash" if pol.model_kind == "flash" else "flash-lite",
-                endpoint="/consultar",
-                allowed=False,
-                reason=f"gemini_reformat_error:{type(e).__name__}:{str(e)[:180]}",
-            )
-            raise HTTPException(status_code=502, detail="Respuesta legal inválida. Reintenta.")
+    raw = (response.text or "").strip()
+    normalized = normalize_model_output_to_json(raw)
 
     # Guardrail JSON ESTRICTO (después del retry)
-    if not _is_pure_json(text):
-        bad_snip = text[:240].replace("\n", "\\n")
+    if not normalized:
+        bad_snip = raw[:240].replace("\n", "\\n")
         insert_usage_event(
             visitor_id=data.visitor_id,
             user_id=data.user_id,
@@ -335,9 +343,11 @@ def consultar(request: Request, data: Consulta):
             model_used="flash" if pol.model_kind == "flash" else "flash-lite",
             endpoint="/consultar",
             allowed=False,
-            reason=f"invalid_json_envelope:{bad_snip}",
+            reason=f"invalid_model_output:{bad_snip}",
         )
         raise HTTPException(status_code=502, detail="Respuesta legal inválida. Reintenta.")
+
+    text = normalized
 
     # Registrar uso OK (consumo 1 consulta)
     insert_usage_event(
