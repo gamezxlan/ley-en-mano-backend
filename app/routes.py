@@ -9,6 +9,7 @@ from .ip_utils import get_client_ip
 from .usage_repo import upsert_visitor, insert_usage_event, ensure_user
 from .policy_service import build_policy
 import os
+import json
 
 router = APIRouter()
 client = genai.Client(api_key=os.environ["GOOGLE_API_KEY"])
@@ -59,82 +60,77 @@ def _validate_visitor_id(visitor_id: str):
 
 
 def _policy_overlay_text(policy):
-    common_rules = """
+    common = """
 POLICY (OBLIGATORIA):
 - Responde en JSON PURO (sin ``` ni texto fuera del JSON).
-- Cita ley y artículo en cada fundamento.
-- Evita afirmar ilegalidad categórica si depende de prueba: usa "acto impugnable" / "podría constituir".
+- NO inventes secciones fuera del schema.
+- Si una clave es null en el schema, debe ser null (no arreglo, no lista, no texto).
 """
 
     if policy.profile == "guest":
-        return common_rules + """
-MODO: GUEST
-- response_mode = blindaje_only
+        return common + """
+PERFIL: GUEST
+LIMITES:
 - cards_per_step = 1
 JSON SCHEMA ESTRICTO:
 {
   "diagnostico": null,
-  "fundamento_tactico": [
-    {"ley": "string", "articulo": "string", "sustento": "string"}
-  ],
+  "fundamento_tactico": null,
   "ruta_blindaje": [
     {
       "paso": 1,
       "titulo": "string",
       "cards": [
-        {
-          "titulo": "string",
-          "accion": "string",
-          "que_decir": "string"
-        }
+        { "titulo": "string", "accion": "string", "que_decir": "string" }
       ]
     }
-  ]
+  ],
+  "formato_emergencia": null,
+  "telefono_contacto": null
 }
 REGLAS:
-- diagnostico SIEMPRE null.
-- En cada paso, cards máximo 1.
-- ruta_blindaje debe tener pasos numerados desde 1.
+- diagnostico MUST be null
+- fundamento_tactico MUST be null
+- formato_emergencia MUST be null
+- telefono_contacto MUST be null
+- Máximo 1 card por paso.
 """
 
     if policy.profile == "free":
-        return common_rules + """
-MODO: FREE (registrado sin plan)
-- response_mode = diagnostico_y_blindaje
-- cards_per_step = 2
+        return common + """
+PERFIL: FREE (registrado sin plan)
+LIMITES:
+- cards_per_step = 1
 JSON SCHEMA ESTRICTO:
 {
   "diagnostico": {
     "resumen": "string",
     "gravedad": "Alta|Media|Baja"
   },
-  "fundamento_tactico": [
-    {"ley": "string", "articulo": "string", "sustento": "string"}
-  ],
+  "fundamento_tactico": null,
   "ruta_blindaje": [
     {
       "paso": 1,
       "titulo": "string",
       "cards": [
-        {
-          "titulo": "string",
-          "accion": "string",
-          "que_decir": "string"
-        }
+        { "titulo": "string", "accion": "string", "que_decir": "string" }
       ]
     }
-  ]
+  ],
+  "formato_emergencia": null,
+  "telefono_contacto": null
 }
 REGLAS:
-- diagnostico NO puede ser null.
-- En cada paso, cards máximo 2.
+- diagnostico NO puede ser null
+- fundamento_tactico MUST be null
+- formato_emergencia MUST be null
+- telefono_contacto MUST be null
+- Máximo 1 card por paso.
 """
 
     # premium
-    return common_rules + """
-MODO: PREMIUM (plan activo)
-- response_mode = full
-- cards_per_step = full
+    return common + """
+PERFIL: PREMIUM (plan activo)
 JSON SCHEMA ESTRICTO:
 {
   "diagnostico": {
@@ -142,7 +138,7 @@ JSON SCHEMA ESTRICTO:
     "gravedad": "Alta|Media|Baja"
   },
   "fundamento_tactico": [
-    {"ley": "string", "articulo": "string", "sustento": "string"}
+    {"ley":"string","articulo":"string","sustento":"string"}
   ],
   "ruta_blindaje": [
     {
@@ -150,26 +146,32 @@ JSON SCHEMA ESTRICTO:
       "titulo": "string",
       "cards": [
         {
-          "titulo": "string",
-          "accion": "string",
-          "que_decir": "string",
-          "que_no_decir": "string",
-          "riesgo_si_no_haces": "string"
+          "titulo":"string",
+          "accion":"string",
+          "que_decir":"string",
+          "que_no_decir":"string",
+          "riesgo_si_no_haces":"string"
         }
       ]
     }
   ],
-  "formatos_sugeridos": [
-    {"tipo": "PROFECO|CONDUSEF|TRÁNSITO|COMAR|OTRO", "titulo": "string", "campos": ["string"]}
-  ],
-  "contactos": [
-    {"institucion": "string", "contacto": "string"}
-  ]
+  "formato_emergencia": null,
+  "telefono_contacto": null
 }
 REGLAS:
+- ruta_blindaje debe tener 3+ pasos cuando el caso lo amerite.
 - Sin recorte de cards.
-- Si aplica, incluye formatos_sugeridos y contactos.
+- Incluir fundamento_tactico (no null).
+- formato_emergencia y telefono_contacto: si no aplica, null.
 """
+
+
+def _limit_cards_to_one(o: dict):
+    rb = o.get("ruta_blindaje")
+    if isinstance(rb, list):
+        for step in rb:
+            if isinstance(step, dict) and isinstance(step.get("cards"), list):
+                step["cards"] = step["cards"][:1]
 
 
 def _strip_code_fences(s: str) -> str:
@@ -207,6 +209,32 @@ def normalize_model_output_to_json(text: str) -> str | None:
     return _extract_first_json_object(t)
 
 
+def enforce_profile_shape(obj: dict, profile: str) -> dict:
+    # asegurar llaves base
+    for k in ["diagnostico", "fundamento_tactico", "ruta_blindaje", "formato_emergencia", "telefono_contacto"]:
+        if k not in obj:
+            obj[k] = None
+
+    if profile == "guest":
+        obj["diagnostico"] = None
+        obj["fundamento_tactico"] = None
+        obj["formato_emergencia"] = None
+        obj["telefono_contacto"] = None
+        _limit_cards_to_one(obj)
+
+    elif profile == "free":
+        obj["fundamento_tactico"] = None
+        obj["formato_emergencia"] = None
+        obj["telefono_contacto"] = None
+        _limit_cards_to_one(obj)
+
+    else:
+        # premium: no recorte
+        pass
+
+    return obj
+
+
 @router.post("/policy")
 @limiter.limit("30/minute")
 def policy(request: Request, data: PolicyRequest):
@@ -240,7 +268,6 @@ def consultar(request: Request, data: Consulta):
     if data.user_id:
         ensure_user(data.user_id)
 
-    # anti-spam corto (minutos)
     allowed, wait = check_ip_visitor(ip, data.visitor_id)
     if not allowed:
         insert_usage_event(
@@ -274,12 +301,7 @@ def consultar(request: Request, data: Consulta):
         )
         raise HTTPException(
             status_code=429,
-            detail={
-                "error": "QUOTA_EXCEEDED",
-                "profile": pol.profile,
-                "reset_at": pol.reset_at_iso,
-                "remaining": 0,
-            },
+            detail={"error": "QUOTA_EXCEEDED", "profile": pol.profile, "reset_at": pol.reset_at_iso, "remaining": 0},
         )
 
     cache_kind = "flash" if pol.model_kind == "flash" else "lite"
@@ -295,9 +317,7 @@ def consultar(request: Request, data: Consulta):
                 types.Content(role="user", parts=[types.Part(text=overlay)]),
                 types.Content(role="user", parts=[types.Part(text=data.pregunta.strip())]),
             ],
-            config=types.GenerateContentConfig(
-                cached_content=cache.name
-            ),
+            config=types.GenerateContentConfig(cached_content=cache.name),
         )
     except Exception as e:
         insert_usage_event(
@@ -329,7 +349,24 @@ def consultar(request: Request, data: Consulta):
         )
         raise HTTPException(status_code=502, detail="Respuesta legal inválida. Reintenta.")
 
-    # Registrar uso OK (consumo 1 consulta)
+    try:
+        obj = json.loads(normalized)
+    except Exception:
+        bad_snip = normalized[:240].replace("\n", "\\n")
+        insert_usage_event(
+            visitor_id=data.visitor_id,
+            user_id=data.user_id,
+            profile=pol.profile,
+            plan_code=pol.plan_code,
+            model_used="flash" if pol.model_kind == "flash" else "flash-lite",
+            endpoint="/consultar",
+            allowed=False,
+            reason=f"json_parse_error:{bad_snip}",
+        )
+        raise HTTPException(status_code=502, detail="Respuesta legal inválida. Reintenta.")
+
+    obj = enforce_profile_shape(obj, pol.profile)
+
     insert_usage_event(
         visitor_id=data.visitor_id,
         user_id=data.user_id,
@@ -348,10 +385,9 @@ def consultar(request: Request, data: Consulta):
         "plan_code": pol.plan_code,
         "remaining_after": max(0, pol.remaining - 1),
         "reset_at": pol.reset_at_iso,
-        "respuesta": normalized,
+        "respuesta": obj,
     }
 
-    # Solo para debug no-prod (opcional)
     if os.getenv("ENV") != "production":
         resp["debug_raw"] = raw[:2000]
 
