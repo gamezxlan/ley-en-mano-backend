@@ -6,9 +6,8 @@ from .cache import get_cache, MODEL_FLASH, MODEL_LITE
 from .ratelimit import limiter
 from .blocklist import check_ip_visitor
 from .ip_utils import get_client_ip
-from .usage_repo import upsert_visitor, insert_usage_event
+from .usage_repo import upsert_visitor, insert_usage_event, ensure_user
 from .policy_service import build_policy
-from .usage_repo import ensure_user
 import os
 
 router = APIRouter()
@@ -176,15 +175,12 @@ REGLAS:
 @router.post("/policy")
 @limiter.limit("30/minute")
 def policy(request: Request, data: PolicyRequest):
-    ip = get_client_ip(request)
     _validate_visitor_id(data.visitor_id)
 
     if data.user_id:
         ensure_user(data.user_id)
 
-    # upsert visitor
     upsert_visitor(data.visitor_id, data.user_id)
-
     pol = build_policy(data.visitor_id, data.user_id)
 
     return {
@@ -192,17 +188,11 @@ def policy(request: Request, data: PolicyRequest):
         "user_id": data.user_id,
         "profile": pol.profile,
         "plan_code": pol.plan_code,
-        "limits": {
-            "daily": pol.daily_limit,
-            "monthly": pol.monthly_limit,
-        },
+        "limits": {"daily": pol.daily_limit, "monthly": pol.monthly_limit},
         "remaining": pol.remaining,
         "reset_at": pol.reset_at_iso,
         "model": "flash" if pol.model_kind == "flash" else "flash-lite",
-        "response": {
-            "mode": pol.response_mode,
-            "cards_per_step": pol.cards_per_step
-        }
+        "response": {"mode": pol.response_mode, "cards_per_step": pol.cards_per_step},
     }
 
 
@@ -215,7 +205,7 @@ def consultar(request: Request, data: Consulta):
     if data.user_id:
         ensure_user(data.user_id)
 
-    # anti-spam corto (minutos)
+    # anti-spam corto (minutos) por IP+visitor (NO cuotas)
     allowed, wait = check_ip_visitor(ip, data.visitor_id)
     if not allowed:
         insert_usage_event(
@@ -233,7 +223,6 @@ def consultar(request: Request, data: Consulta):
     if not data.pregunta or len(data.pregunta.strip()) < 3:
         raise HTTPException(status_code=400, detail="pregunta inválida")
 
-    # upsert visitor
     upsert_visitor(data.visitor_id, data.user_id)
 
     # policy + cuotas negocio (DB)
@@ -255,8 +244,8 @@ def consultar(request: Request, data: Consulta):
                 "error": "QUOTA_EXCEEDED",
                 "profile": pol.profile,
                 "reset_at": pol.reset_at_iso,
-                "remaining": 0
-            }
+                "remaining": 0,
+            },
         )
 
     # Selección cache/modelo
@@ -265,35 +254,49 @@ def consultar(request: Request, data: Consulta):
     model_name = MODEL_FLASH if pol.model_kind == "flash" else MODEL_LITE
 
     overlay = _policy_overlay_text(pol)
-    contents = [
-        types.Content(role="user", parts=[types.Part(text=data.pregunta.strip())]),
-    ]
 
-    response = client.models.generate_content(
-        model=model_name,
-        contents=contents,
-        config=types.GenerateContentConfig(
-            cached_content=cache.name,
-            system_instruction=[types.Part(text=_policy_overlay_text(pol))]
+    # IMPORTANTE:
+    # Con cached_content, evitamos pasar system_instruction en el request.
+    # Mandamos el POLICY como primer mensaje user.
+    try:
+        response = client.models.generate_content(
+            model=model_name,
+            contents=[
+                types.Content(role="user", parts=[types.Part(text=overlay)]),
+                types.Content(role="user", parts=[types.Part(text=data.pregunta.strip())]),
+            ],
+            config=types.GenerateContentConfig(
+                cached_content=cache.name
+            ),
         )
-    )
+    except Exception as e:
+        insert_usage_event(
+            visitor_id=data.visitor_id,
+            user_id=data.user_id,
+            profile=pol.profile,
+            plan_code=pol.plan_code,
+            model_used="flash" if pol.model_kind == "flash" else "flash-lite",
+            endpoint="/consultar",
+            allowed=False,
+            reason=f"gemini_error:{type(e).__name__}:{str(e)[:180]}",
+        )
+        raise HTTPException(status_code=502, detail="IA no disponible. Reintenta.")
 
     text = (response.text or "").strip()
 
-    # Guardrail JSON (igual que antes)
+    # Guardrail JSON ESTRICTO (NO aceptamos ```json)
     if not text.startswith("{") or not text.endswith("}"):
-        if not text.startswith("```json") or not text.endswith("```"):
-            insert_usage_event(
-                visitor_id=data.visitor_id,
-                user_id=data.user_id,
-                profile=pol.profile,
-                plan_code=pol.plan_code,
-                model_used="flash" if pol.model_kind == "flash" else "flash-lite",
-                endpoint="/consultar",
-                allowed=False,
-                reason="invalid_model_output",
-            )
-            raise HTTPException(status_code=502, detail="Respuesta legal inválida. Reintenta.")
+        insert_usage_event(
+            visitor_id=data.visitor_id,
+            user_id=data.user_id,
+            profile=pol.profile,
+            plan_code=pol.plan_code,
+            model_used="flash" if pol.model_kind == "flash" else "flash-lite",
+            endpoint="/consultar",
+            allowed=False,
+            reason="invalid_json_envelope",
+        )
+        raise HTTPException(status_code=502, detail="Respuesta legal inválida. Reintenta.")
 
     # Registrar uso OK (consumo 1 consulta)
     insert_usage_event(
@@ -314,5 +317,5 @@ def consultar(request: Request, data: Consulta):
         "plan_code": pol.plan_code,
         "remaining_after": max(0, pol.remaining - 1),
         "reset_at": pol.reset_at_iso,
-        "respuesta": text
+        "respuesta": text,
     }
