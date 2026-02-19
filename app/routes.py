@@ -88,6 +88,9 @@ def policy(request: Request, data: PolicyRequest):
     ip = get_client_ip(request)
     _validate_visitor_id(data.visitor_id)
 
+    if data.user_id:
+        ensure_user(data.user_id)
+
     # upsert visitor
     upsert_visitor(data.visitor_id, data.user_id)
 
@@ -117,6 +120,9 @@ def policy(request: Request, data: PolicyRequest):
 def consultar(request: Request, data: Consulta):
     ip = get_client_ip(request)
     _validate_visitor_id(data.visitor_id)
+
+    if data.user_id:
+        ensure_user(data.user_id)
 
     # anti-spam corto (minutos)
     allowed, wait = check_ip_visitor(ip, data.visitor_id)
