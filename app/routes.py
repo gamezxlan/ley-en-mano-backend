@@ -89,6 +89,7 @@ SCHEMA ESTRICTO:
       {"titulo":"string","accion":"string"}
     ]
   },
+  "Riesgos y Consecuencias": null,
   "Formato de Emergencia": null,
   "Teléfono de contacto": null
 }
@@ -123,6 +124,7 @@ SCHEMA ESTRICTO:
       {"titulo":"string","accion":"string"}
     ]
   },
+  "Riesgos y Consecuencias": null,
   "Formato de Emergencia": null,
   "Teléfono de contacto": null
 }
@@ -162,6 +164,13 @@ SCHEMA ESTRICTO:
       {"titulo":"string","accion":"string","que_decir":"string"}
     ]
   },
+  "Riesgos y Consecuencias": {
+  "errores_comunes": ["string"],
+  "frases_que_empeoran": ["string"],
+  "no_entregar": ["string"],
+  "no_firmar": ["string"],
+  "momentos_criticos": ["string"]
+},
   "Formato de Emergencia": {
     "disponible": true,
     "titulo": "string",
@@ -172,24 +181,26 @@ SCHEMA ESTRICTO:
   ]
 }
 REGLAS:
+- En Fundamento Táctico no juntes las leyes que aplican, explica cada una por separado.
 - Debes incluir SIEMPRE paso_1_inmediato, paso_2_discurso, paso_3_denuncia.
 - En paso_1_inmediato: puedes agregar mas acciones en la lista cuando sea necesario.
 - En paso_3_denuncia: puedes agregar mas denuncias en la lista cuando sea necesario.
 - Puedes agregar paso_4_adicional, paso_5_adicional, etc. cuando sea necesario.
-- Si no aplica Formato de Emergencia o Teléfono, usa null (no inventar).
+- Si no aplica Riesgos y Consecuencias, Formato de Emergencia o Teléfono, usa null (no inventar).
 """
 
 LEGACY_KEYS = {
     "diagnostico": "Diagnóstico Jurídico",
     "fundamento_tactico": "Fundamento Táctico",
     "ruta_blindaje": "Ruta de Blindaje",
+    "riesgos_consecuencias": "Riesgos y Consecuencias",
     "formato_emergencia": "Formato de Emergencia",
     "telefono_contacto": "Teléfono de contacto",
 }
 
 def _drop_lowercase_keys_if_present(obj: dict) -> None:
     # por si el modelo mete llaves nuevas (minúsculas) las quitamos
-    for k in ["diagnostico", "fundamento_tactico", "ruta_blindaje", "formato_emergencia", "telefono_contacto"]:
+    for k in ["Diagnóstico Jurídico", "Fundamento Táctico", "Ruta de Blindaje", "Riesgos y Consecuencias", "Formato de Emergencia", "Teléfono de contacto"]:
         if k in obj:
             obj.pop(k, None)
 
@@ -217,6 +228,7 @@ def enforce_profile_shape_legacy(obj: dict, profile: str) -> dict:
       Diagnóstico Jurídico = null
       Fundamento Táctico = null
       Ruta de Blindaje = 3 pasos (objeto con paso_1, paso_2, paso_3)
+      Riesgos y Consecuencias = null
       Formato de Emergencia = null
       Teléfono de contacto = null
 
@@ -224,6 +236,7 @@ def enforce_profile_shape_legacy(obj: dict, profile: str) -> dict:
       Diagnóstico Jurídico = objeto
       Fundamento Táctico = null
       Ruta de Blindaje = 3 pasos
+      Riesgos y Consecuencias = null
       Formato de Emergencia = null
       Teléfono de contacto = null
 
@@ -235,7 +248,7 @@ def enforce_profile_shape_legacy(obj: dict, profile: str) -> dict:
     _drop_lowercase_keys_if_present(obj)
 
     # 1) Asegurar que existan las llaves legacy (si faltan, se crean)
-    for k in ["Diagnóstico Jurídico", "Fundamento Táctico", "Ruta de Blindaje", "Formato de Emergencia", "Teléfono de contacto"]:
+    for k in ["Diagnóstico Jurídico", "Fundamento Táctico", "Ruta de Blindaje", "Riesgos y Consecuencias", "Formato de Emergencia", "Teléfono de contacto"]:
         if k not in obj:
             obj[k] = None
 
@@ -243,12 +256,14 @@ def enforce_profile_shape_legacy(obj: dict, profile: str) -> dict:
     if profile == "guest":
         obj["Diagnóstico Jurídico"] = None
         obj["Fundamento Táctico"] = None
+        obj["Riesgos y Consecuencias"] = None
         obj["Formato de Emergencia"] = None
         obj["Teléfono de contacto"] = None
         _limit_legacy_cards_guest_free(obj)
 
     elif profile == "free":
         obj["Fundamento Táctico"] = None
+        obj["Riesgos y Consecuencias"] = None
         obj["Formato de Emergencia"] = None
         obj["Teléfono de contacto"] = None
         _limit_legacy_cards_guest_free(obj)
