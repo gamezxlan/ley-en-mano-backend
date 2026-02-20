@@ -187,6 +187,7 @@ REGLAS:
 - En paso_3_denuncia: puedes agregar mas denuncias en la lista cuando sea necesario.
 - Puedes agregar paso_4_adicional, paso_5_adicional, etc. cuando sea necesario.
 - Si no aplica Riesgos y Consecuencias, Formato de Emergencia o Teléfono, usa null (no inventar).
+- En campos de Formato de Emergencia, solo enlista los campos que son necesarios para llenar el formato
 """
 
 LEGACY_KEYS = {
@@ -198,9 +199,27 @@ LEGACY_KEYS = {
     "telefono_contacto": "Teléfono de contacto",
 }
 
+LEGACY_TOP_KEYS = [
+    "Diagnóstico Jurídico",
+    "Fundamento Táctico",
+    "Ruta de Blindaje",
+    "Riesgos y Consecuencias",
+    "Formato de Emergencia",
+    "Teléfono de contacto",
+]
+
+LOWERCASE_KEYS = [
+    "diagnostico",
+    "fundamento_tactico",
+    "ruta_blindaje",
+    "riesgos_consecuencias",
+    "formato_emergencia",
+    "telefono_contacto",
+]
+
 def _drop_lowercase_keys_if_present(obj: dict) -> None:
-    # por si el modelo mete llaves nuevas (minúsculas) las quitamos
-    for k in ["Diagnóstico Jurídico", "Fundamento Táctico", "Ruta de Blindaje", "Riesgos y Consecuencias", "Formato de Emergencia", "Teléfono de contacto"]:
+    # Si el modelo metió llaves nuevas (minúsculas/snake_case), las quitamos
+    for k in LOWERCASE_KEYS:
         if k in obj:
             obj.pop(k, None)
 
@@ -220,6 +239,12 @@ def _limit_legacy_cards_guest_free(obj: dict) -> None:
     p3 = rb.get("paso_3_denuncia")
     if isinstance(p3, list):
         rb["paso_3_denuncia"] = p3[:1]
+
+def _upgrade_lowercase_to_legacy(obj: dict) -> None:
+    # Si viene snake_case y NO viene legacy, la subimos a legacy.
+    for low, legacy in LEGACY_KEYS.items():
+        if legacy not in obj and low in obj:
+            obj[legacy] = obj[low]
 
 def enforce_profile_shape_legacy(obj: dict, profile: str) -> dict:
     """
@@ -446,6 +471,8 @@ def consultar(request: Request, data: Consulta):
         )
         raise HTTPException(status_code=502, detail="Respuesta legal inválida. Reintenta.")
 
+    _upgrade_lowercase_to_legacy(obj)
+    _drop_lowercase_keys_if_present(obj)
     obj = enforce_profile_shape_legacy(obj, pol.profile)
 
     insert_usage_event(
