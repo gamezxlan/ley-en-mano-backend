@@ -436,6 +436,32 @@ def normalize_model_output_to_json(text: str) -> str | None:
         return t
     return _extract_first_json_object(t)
 
+def _get_user_email(user_id: str) -> str | None:
+    """
+    Lee el email del usuario desde DB. Ajusta el nombre de tabla/columna si difiere.
+    Esperado: users(email).
+    """
+    if not user_id:
+        return None
+
+    with pool.connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT email
+                FROM users
+                WHERE user_id = %s
+                """,
+                (user_id,),
+            )
+            row = cur.fetchone()
+
+    if not row:
+        return None
+
+    email = row[0]
+    return str(email) if email else None
+
 # ======================================================
 # ✅ NUEVOS ENDPOINTS: /me y /logout
 # ======================================================
@@ -447,9 +473,11 @@ def me(request: Request):
 
     # Si no hay visitor_id aún, solo regresa estado vacío (frontend puede crear uno)
     if not visitor_id:
+        email = _get_user_email(user_id) if user_id else None
         return {
             "visitor_id": None,
             "user_id": user_id,
+            "email": email,  # ✅
             "profile": "guest" if not user_id else "free",
             "plan_code": None,
             "remaining": None,
@@ -463,10 +491,12 @@ def me(request: Request):
 
     upsert_visitor(visitor_id, user_id)
     pol = build_policy(visitor_id, user_id)
+    email = _get_user_email(user_id) if user_id else None
 
     return {
         "visitor_id": visitor_id,
         "user_id": user_id,
+        "email": email,  # ✅
         "profile": pol.profile,
         "plan_code": pol.plan_code,
         "limits": {"daily": pol.daily_limit, "monthly": pol.monthly_limit},
@@ -500,6 +530,7 @@ def policy(request: Request, response: Response, data: PolicyRequest):
     user_id = _effective_user_id(request, data.user_id)
     if user_id:
         ensure_user(user_id)
+        email = _get_user_email(user_id)
 
     upsert_visitor(visitor_id, user_id)
     pol = build_policy(visitor_id, user_id)
@@ -507,6 +538,7 @@ def policy(request: Request, response: Response, data: PolicyRequest):
     return {
         "visitor_id": visitor_id,
         "user_id": user_id,
+        "email": email,  # ✅
         "profile": pol.profile,
         "plan_code": pol.plan_code,
         "limits": {"daily": pol.daily_limit, "monthly": pol.monthly_limit},
