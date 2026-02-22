@@ -52,7 +52,7 @@ def _set_cookie_common(response: Response, key: str, value: str, *, max_age: int
     kwargs = dict(
         key=key,
         value=value,
-        httponly=False,      # visitor_id no es sensible
+        httponly=True,      # visitor_id no es sensible
         secure=(ENV == "production"),
         samesite="lax",
         max_age=max_age,
