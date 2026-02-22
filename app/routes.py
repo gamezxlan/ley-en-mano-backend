@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Request, Response
 from pydantic import BaseModel, field_validator
 from google import genai
 from google.genai import types
@@ -8,21 +8,143 @@ from .blocklist import check_ip_visitor
 from .ip_utils import get_client_ip
 from .usage_repo import upsert_visitor, insert_usage_event, ensure_user
 from .policy_service import build_policy
+from .db import pool
+
 import os
 import json
+import hashlib
+from datetime import datetime, timezone
+
 
 router = APIRouter()
 client = genai.Client(api_key=os.environ["GOOGLE_API_KEY"])
 
+# ======================================================
+# 🍪 COOKIES / SESSION HELPERS
+# ======================================================
+
+ENV = os.getenv("ENV", "development")
+COOKIE_DOMAIN = os.getenv("COOKIE_DOMAIN", ".leyenmano.com" if ENV == "production" else None)
+SESSION_COOKIE_NAME = os.getenv("SESSION_COOKIE_NAME", "session_id")
+VISITOR_COOKIE_NAME = os.getenv("VISITOR_COOKIE_NAME", "visitor_id")
+SESSION_PEPPER = os.getenv("SESSION_PEPPER", "")  # recomendado setear en prod
+
+def _now_utc() -> datetime:
+    return datetime.now(timezone.utc)
+
+def _sha256_hex(s: str) -> str:
+    return hashlib.sha256(s.encode("utf-8")).hexdigest()
+
+def _session_hash(session_id: str) -> str:
+    # hash con "pepper" opcional (recomendado para prod)
+    base = f"{SESSION_PEPPER}:{session_id}" if SESSION_PEPPER else session_id
+    return _sha256_hex(base)
+
+def _get_cookie(request: Request, key: str) -> str | None:
+    v = request.cookies.get(key)
+    if not v:
+        return None
+    v = str(v).strip()
+    return v or None
+
+def _set_cookie_common(response: Response, key: str, value: str, *, max_age: int):
+    # Nota: si COOKIE_DOMAIN es None (dev), no se setea domain
+    kwargs = dict(
+        key=key,
+        value=value,
+        httponly=False,      # visitor_id no es sensible
+        secure=(ENV == "production"),
+        samesite="lax",
+        max_age=max_age,
+        path="/",
+    )
+    if COOKIE_DOMAIN:
+        kwargs["domain"] = COOKIE_DOMAIN
+    response.set_cookie(**kwargs)
+
+def _set_visitor_cookie(response: Response, visitor_id: str):
+    # 180 días
+    _set_cookie_common(response, VISITOR_COOKIE_NAME, visitor_id, max_age=60 * 60 * 24 * 180)
+
+def _delete_cookie(response: Response, key: str):
+    kwargs = dict(
+        key=key,
+        path="/",
+    )
+    if COOKIE_DOMAIN:
+        kwargs["domain"] = COOKIE_DOMAIN
+    response.delete_cookie(**kwargs)
+
+def _get_session_user_id(request: Request) -> str | None:
+    """
+    Lee cookie session_id, busca en DB sessions(session_id_hash) si está vigente.
+    Devuelve user_id (str) o None.
+    """
+    sid = _get_cookie(request, SESSION_COOKIE_NAME)
+    if not sid:
+        return None
+
+    sid_hash = _session_hash(sid)
+
+    with pool.connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT user_id
+                FROM sessions
+                WHERE session_id_hash = %s
+                  AND revoked_at IS NULL
+                  AND expires_at > NOW()
+                """,
+                (sid_hash,),
+            )
+            row = cur.fetchone()
+
+            # opcional: actualizar last_seen_at
+            if row:
+                cur.execute(
+                    "UPDATE sessions SET last_seen_at = NOW() WHERE session_id_hash = %s",
+                    (sid_hash,),
+                )
+        conn.commit()
+
+    if not row:
+        return None
+
+    return str(row[0])
+
+def _revoke_session(request: Request):
+    sid = _get_cookie(request, SESSION_COOKIE_NAME)
+    if not sid:
+        return
+    sid_hash = _session_hash(sid)
+    with pool.connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE sessions
+                SET revoked_at = NOW()
+                WHERE session_id_hash = %s
+                  AND revoked_at IS NULL
+                """,
+                (sid_hash,),
+            )
+        conn.commit()
+
+# ======================================================
+# MODELOS
+# ======================================================
 
 class PolicyRequest(BaseModel):
-    visitor_id: str
+    visitor_id: str | None = None
     user_id: str | None = None
 
     @field_validator("visitor_id")
     @classmethod
     def visitor_id_to_str(cls, v):
-        return str(v).strip()
+        if v is None:
+            return None
+        return str(v).strip() or None
 
     @field_validator("user_id")
     @classmethod
@@ -35,7 +157,7 @@ class PolicyRequest(BaseModel):
 
 class Consulta(BaseModel):
     pregunta: str
-    visitor_id: str
+    visitor_id: str | None = None
     user_id: str | None = None
     locale: str | None = None
     source: str | None = None
@@ -43,7 +165,9 @@ class Consulta(BaseModel):
     @field_validator("visitor_id")
     @classmethod
     def visitor_id_to_str(cls, v):
-        return str(v).strip()
+        if v is None:
+            return None
+        return str(v).strip() or None
 
     @field_validator("user_id")
     @classmethod
@@ -58,6 +182,21 @@ def _validate_visitor_id(visitor_id: str):
     if len(visitor_id) < 6 or len(visitor_id) > 80:
         raise HTTPException(status_code=400, detail="visitor_id inválido")
 
+def _effective_visitor_id(request: Request, body_visitor_id: str | None) -> str | None:
+    # prioridad: body -> cookie
+    if body_visitor_id:
+        return body_visitor_id
+    return _get_cookie(request, VISITOR_COOKIE_NAME)
+
+def _effective_user_id(request: Request, body_user_id: str | None) -> str | None:
+    # prioridad: body -> cookie session
+    if body_user_id:
+        return body_user_id
+    return _get_session_user_id(request)
+
+# ======================================================
+# OVERLAY / NORMALIZACIÓN
+# ======================================================
 
 def _policy_overlay_text(policy):
     common = """
@@ -165,12 +304,12 @@ SCHEMA ESTRICTO:
     ]
   },
   "Riesgos y Consecuencias": {
-  "errores_comunes": ["string"],
-  "frases_que_empeoran": ["string"],
-  "no_entregar": ["string"],
-  "no_firmar": ["string"],
-  "momentos_criticos": ["string"]
-},
+    "errores_comunes": ["string"],
+    "frases_que_empeoran": ["string"],
+    "no_entregar": ["string"],
+    "no_firmar": ["string"],
+    "momentos_criticos": ["string"]
+  },
   "Formato de Emergencia": {
     "disponible": true,
     "titulo": "string",
@@ -199,15 +338,6 @@ LEGACY_KEYS = {
     "telefono_contacto": "Teléfono de contacto",
 }
 
-LEGACY_TOP_KEYS = [
-    "Diagnóstico Jurídico",
-    "Fundamento Táctico",
-    "Ruta de Blindaje",
-    "Riesgos y Consecuencias",
-    "Formato de Emergencia",
-    "Teléfono de contacto",
-]
-
 LOWERCASE_KEYS = [
     "diagnostico",
     "fundamento_tactico",
@@ -218,16 +348,11 @@ LOWERCASE_KEYS = [
 ]
 
 def _drop_lowercase_keys_if_present(obj: dict) -> None:
-    # Si el modelo metió llaves nuevas (minúsculas/snake_case), las quitamos
     for k in LOWERCASE_KEYS:
         if k in obj:
             obj.pop(k, None)
 
 def _limit_legacy_cards_guest_free(obj: dict) -> None:
-    """
-    guest/free: 1 card en paso_1_inmediato y 1 card en paso_3_denuncia
-    paso_2_discurso: listas cortas (no recortamos aquí, solo respetamos lo que venga)
-    """
     rb = obj.get("Ruta de Blindaje")
     if not isinstance(rb, dict):
         return
@@ -241,43 +366,24 @@ def _limit_legacy_cards_guest_free(obj: dict) -> None:
         rb["paso_3_denuncia"] = p3[:1]
 
 def _upgrade_lowercase_to_legacy(obj: dict) -> None:
-    # Si viene snake_case y NO viene legacy, la subimos a legacy.
     for low, legacy in LEGACY_KEYS.items():
         if legacy not in obj and low in obj:
             obj[legacy] = obj[low]
 
 def enforce_profile_shape_legacy(obj: dict, profile: str) -> dict:
-    """
-    Contrato FINAL:
-    guest:
-      Diagnóstico Jurídico = null
-      Fundamento Táctico = null
-      Ruta de Blindaje = 3 pasos (objeto con paso_1, paso_2, paso_3)
-      Riesgos y Consecuencias = null
-      Formato de Emergencia = null
-      Teléfono de contacto = null
-
-    free:
-      Diagnóstico Jurídico = objeto
-      Fundamento Táctico = null
-      Ruta de Blindaje = 3 pasos
-      Riesgos y Consecuencias = null
-      Formato de Emergencia = null
-      Teléfono de contacto = null
-
-    premium:
-      todo puede ir (según aplique). No recortamos.
-    """
-
-    # 0) si viene algo en minúsculas, lo eliminamos para no mezclar contratos
     _drop_lowercase_keys_if_present(obj)
 
-    # 1) Asegurar que existan las llaves legacy (si faltan, se crean)
-    for k in ["Diagnóstico Jurídico", "Fundamento Táctico", "Ruta de Blindaje", "Riesgos y Consecuencias", "Formato de Emergencia", "Teléfono de contacto"]:
+    for k in [
+        "Diagnóstico Jurídico",
+        "Fundamento Táctico",
+        "Ruta de Blindaje",
+        "Riesgos y Consecuencias",
+        "Formato de Emergencia",
+        "Teléfono de contacto",
+    ]:
         if k not in obj:
             obj[k] = None
 
-    # 2) Forzado por perfil
     if profile == "guest":
         obj["Diagnóstico Jurídico"] = None
         obj["Fundamento Táctico"] = None
@@ -293,16 +399,10 @@ def enforce_profile_shape_legacy(obj: dict, profile: str) -> dict:
         obj["Teléfono de contacto"] = None
         _limit_legacy_cards_guest_free(obj)
 
-        # Si por error el modelo puso null, lo dejamos como viene, pero idealmente debe ser objeto.
-        # (Si quieres strict: si viene null => 502)
-        # comment
-
     else:
-        # premium: no recortamos; si no aplica FE/teléfono, puede ser null.
         pass
 
     return obj
-
 
 def _strip_code_fences(s: str) -> str:
     t = (s or "").strip()
@@ -313,7 +413,6 @@ def _strip_code_fences(s: str) -> str:
         if t.rstrip().endswith("```"):
             t = t.rstrip()[:-3]
     return t.strip()
-
 
 def _extract_first_json_object(s: str) -> str | None:
     start = s.find("{")
@@ -330,7 +429,6 @@ def _extract_first_json_object(s: str) -> str | None:
                 return s[start : i + 1].strip()
     return None
 
-
 def normalize_model_output_to_json(text: str) -> str | None:
     t = (text or "").strip()
     t = _strip_code_fences(t)
@@ -338,21 +436,37 @@ def normalize_model_output_to_json(text: str) -> str | None:
         return t
     return _extract_first_json_object(t)
 
+# ======================================================
+# ✅ NUEVOS ENDPOINTS: /me y /logout
+# ======================================================
 
-@router.post("/policy")
-@limiter.limit("30/minute")
-def policy(request: Request, data: PolicyRequest):
-    _validate_visitor_id(data.visitor_id)
+@router.get("/me")
+def me(request: Request):
+    visitor_id = _effective_visitor_id(request, None)
+    user_id = _effective_user_id(request, None)
 
-    if data.user_id:
-        ensure_user(data.user_id)
+    # Si no hay visitor_id aún, solo regresa estado vacío (frontend puede crear uno)
+    if not visitor_id:
+        return {
+            "visitor_id": None,
+            "user_id": user_id,
+            "profile": "guest" if not user_id else "free",
+            "plan_code": None,
+            "remaining": None,
+            "reset_at": None,
+        }
 
-    upsert_visitor(data.visitor_id, data.user_id)
-    pol = build_policy(data.visitor_id, data.user_id)
+    _validate_visitor_id(visitor_id)
+
+    if user_id:
+        ensure_user(user_id)
+
+    upsert_visitor(visitor_id, user_id)
+    pol = build_policy(visitor_id, user_id)
 
     return {
-        "visitor_id": data.visitor_id,
-        "user_id": data.user_id,
+        "visitor_id": visitor_id,
+        "user_id": user_id,
         "profile": pol.profile,
         "plan_code": pol.plan_code,
         "limits": {"daily": pol.daily_limit, "monthly": pol.monthly_limit},
@@ -362,21 +476,67 @@ def policy(request: Request, data: PolicyRequest):
         "response": {"mode": pol.response_mode, "cards_per_step": pol.cards_per_step},
     }
 
+@router.post("/logout")
+def logout(request: Request, response: Response):
+    # revoca sesión en DB y borra cookie
+    _revoke_session(request)
+    _delete_cookie(response, SESSION_COOKIE_NAME)
+    return {"ok": True}
+
+# ======================================================
+# API PRINCIPAL
+# ======================================================
+
+@router.post("/policy")
+@limiter.limit("30/minute")
+def policy(request: Request, response: Response, data: PolicyRequest):
+    visitor_id = _effective_visitor_id(request, data.visitor_id)
+    if not visitor_id:
+        raise HTTPException(status_code=400, detail="visitor_id requerido (body o cookie)")
+
+    _validate_visitor_id(visitor_id)
+    _set_visitor_cookie(response, visitor_id)
+
+    user_id = _effective_user_id(request, data.user_id)
+    if user_id:
+        ensure_user(user_id)
+
+    upsert_visitor(visitor_id, user_id)
+    pol = build_policy(visitor_id, user_id)
+
+    return {
+        "visitor_id": visitor_id,
+        "user_id": user_id,
+        "profile": pol.profile,
+        "plan_code": pol.plan_code,
+        "limits": {"daily": pol.daily_limit, "monthly": pol.monthly_limit},
+        "remaining": pol.remaining,
+        "reset_at": pol.reset_at_iso,
+        "model": "flash" if pol.model_kind == "flash" else "flash-lite",
+        "response": {"mode": pol.response_mode, "cards_per_step": pol.cards_per_step},
+    }
 
 @router.post("/consultar")
 @limiter.limit("5/minute")
-def consultar(request: Request, data: Consulta):
+def consultar(request: Request, response: Response, data: Consulta):
     ip = get_client_ip(request)
-    _validate_visitor_id(data.visitor_id)
 
-    if data.user_id:
-        ensure_user(data.user_id)
+    visitor_id = _effective_visitor_id(request, data.visitor_id)
+    if not visitor_id:
+        raise HTTPException(status_code=400, detail="visitor_id requerido (body o cookie)")
 
-    allowed, wait = check_ip_visitor(ip, data.visitor_id)
+    _validate_visitor_id(visitor_id)
+    _set_visitor_cookie(response, visitor_id)
+
+    user_id = _effective_user_id(request, data.user_id)
+    if user_id:
+        ensure_user(user_id)
+
+    allowed, wait = check_ip_visitor(ip, visitor_id)
     if not allowed:
         insert_usage_event(
-            visitor_id=data.visitor_id,
-            user_id=data.user_id,
+            visitor_id=visitor_id,
+            user_id=user_id,
             profile="unknown",
             plan_code=None,
             model_used="n/a",
@@ -389,13 +549,13 @@ def consultar(request: Request, data: Consulta):
     if not data.pregunta or len(data.pregunta.strip()) < 3:
         raise HTTPException(status_code=400, detail="pregunta inválida")
 
-    upsert_visitor(data.visitor_id, data.user_id)
+    upsert_visitor(visitor_id, user_id)
 
-    pol = build_policy(data.visitor_id, data.user_id)
+    pol = build_policy(visitor_id, user_id)
     if pol.remaining <= 0:
         insert_usage_event(
-            visitor_id=data.visitor_id,
-            user_id=data.user_id,
+            visitor_id=visitor_id,
+            user_id=user_id,
             profile=pol.profile,
             plan_code=pol.plan_code,
             model_used="flash" if pol.model_kind == "flash" else "flash-lite",
@@ -415,7 +575,7 @@ def consultar(request: Request, data: Consulta):
     overlay = _policy_overlay_text(pol)
 
     try:
-        response = client.models.generate_content(
+        response_ai = client.models.generate_content(
             model=model_name,
             contents=[
                 types.Content(role="user", parts=[types.Part(text=overlay)]),
@@ -427,8 +587,8 @@ def consultar(request: Request, data: Consulta):
         )
     except Exception as e:
         insert_usage_event(
-            visitor_id=data.visitor_id,
-            user_id=data.user_id,
+            visitor_id=visitor_id,
+            user_id=user_id,
             profile=pol.profile,
             plan_code=pol.plan_code,
             model_used="flash" if pol.model_kind == "flash" else "flash-lite",
@@ -438,14 +598,14 @@ def consultar(request: Request, data: Consulta):
         )
         raise HTTPException(status_code=502, detail="IA no disponible. Reintenta.")
 
-    raw = (response.text or "").strip()
+    raw = (response_ai.text or "").strip()
     normalized = normalize_model_output_to_json(raw)
 
     if not normalized:
         bad_snip = raw[:240].replace("\n", "\\n")
         insert_usage_event(
-            visitor_id=data.visitor_id,
-            user_id=data.user_id,
+            visitor_id=visitor_id,
+            user_id=user_id,
             profile=pol.profile,
             plan_code=pol.plan_code,
             model_used="flash" if pol.model_kind == "flash" else "flash-lite",
@@ -460,8 +620,8 @@ def consultar(request: Request, data: Consulta):
     except Exception:
         bad_snip = normalized[:240].replace("\n", "\\n")
         insert_usage_event(
-            visitor_id=data.visitor_id,
-            user_id=data.user_id,
+            visitor_id=visitor_id,
+            user_id=user_id,
             profile=pol.profile,
             plan_code=pol.plan_code,
             model_used="flash" if pol.model_kind == "flash" else "flash-lite",
@@ -476,8 +636,8 @@ def consultar(request: Request, data: Consulta):
     obj = enforce_profile_shape_legacy(obj, pol.profile)
 
     insert_usage_event(
-        visitor_id=data.visitor_id,
-        user_id=data.user_id,
+        visitor_id=visitor_id,
+        user_id=user_id,
         profile=pol.profile,
         plan_code=pol.plan_code,
         model_used="flash" if pol.model_kind == "flash" else "flash-lite",
@@ -487,8 +647,8 @@ def consultar(request: Request, data: Consulta):
     )
 
     resp = {
-        "visitor_id": data.visitor_id,
-        "user_id": data.user_id,
+        "visitor_id": visitor_id,
+        "user_id": user_id,
         "profile": pol.profile,
         "plan_code": pol.plan_code,
         "remaining_after": max(0, pol.remaining - 1),

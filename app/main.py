@@ -7,6 +7,8 @@ from slowapi import _rate_limit_exceeded_handler
 from .ratelimit import limiter
 from .routes import router
 from .cache import create_caches
+from .auth_routes import router as auth_router
+
 
 ENV = os.getenv("ENV", "development")
 
@@ -24,6 +26,7 @@ else:
 
 app = FastAPI(title="Ley en Mano")
 
+
 # ===============================
 # 🔐 CORS DINÁMICO
 # ===============================
@@ -33,7 +36,7 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=[
-        "Content-Type"
+        "*"
     ],
 )
 
@@ -55,3 +58,4 @@ def startup():
 # 🚦 ROUTES
 # ===============================
 app.include_router(router)
+app.include_router(auth_router)
