@@ -2,6 +2,7 @@
 from fastapi import APIRouter, Request, Response, HTTPException
 import os, secrets, urllib.parse, requests
 from .auth_repo import upsert_user_by_email, create_session
+from .ip_utils import get_client_ip
 
 ENV = os.getenv("ENV", "development")
 COOKIE_DOMAIN = os.getenv("COOKIE_DOMAIN", ".leyenmano.com" if ENV == "production" else None)
@@ -123,9 +124,11 @@ def google_callback(request: Request, response: Response, code: str | None = Non
 
     # crear/obtener user
     user_id = upsert_user_by_email(email)
+    ip = get_client_ip(request)
+    ua = request.headers.get("user-agent")
 
     # crear session y set cookie
-    session_id = create_session(user_id, days=14)
+    session_id = create_session(user_id, days=14, ip=ip, user_agent=ua)
     _set_session_cookie(response, session_id)
     _clear_state_cookie(response)
 

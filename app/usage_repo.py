@@ -65,12 +65,11 @@ def get_plan_quota(plan_code: str) -> int:
     with pool.connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
-                "SELECT monthly_quota FROM plans WHERE plan_code=%s",
+                "SELECT annual_quota FROM plans WHERE plan_code=%s",
                 (plan_code,)
             )
             row = cur.fetchone()
-    if not row:
-        # por seguridad, si no existe el plan, quota 0
+    if not row or row[0] is None:
         return 0
     return int(row[0])
 

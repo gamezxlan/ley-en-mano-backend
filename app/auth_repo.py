@@ -32,7 +32,7 @@ def upsert_user_by_email(email: str) -> str:
 
     return user_id
 
-def create_session(user_id: str, days: int = 14) -> str:
+def create_session(user_id: str, days: int = 14, ip: str | None = None, user_agent: str | None = None) -> str:
     session_id = str(uuid4())
     session_hash = _hash_session(session_id)
     expires_at = datetime.now(timezone.utc) + timedelta(days=days)
@@ -41,10 +41,15 @@ def create_session(user_id: str, days: int = 14) -> str:
         with conn.cursor() as cur:
             cur.execute(
                 """
-                INSERT INTO sessions(session_id_hash, user_id, created_at, last_seen_at, expires_at, revoked_at)
-                VALUES (%s, %s, NOW(), NOW(), %s, NULL)
+                INSERT INTO sessions(
+                  session_id_hash, user_id,
+                  created_at, last_seen_at,
+                  expires_at, ip, user_agent,
+                  revoked_at
+                )
+                VALUES (%s, %s, NOW(), NOW(), %s, %s, %s, NULL)
                 """,
-                (session_hash, user_id, expires_at),
+                (session_hash, user_id, expires_at, ip, user_agent),
             )
         conn.commit()
 
