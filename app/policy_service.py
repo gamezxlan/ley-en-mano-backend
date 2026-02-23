@@ -36,7 +36,7 @@ def _reset_at_daily_iso():
     return tomorrow.isoformat()
 
 
-def build_policy(visitor_id: str, user_id: str | None) -> Policy:
+def build_policy(visitor_id: str, user_id: str | None, ip_hash: str | None) -> Policy:
     # Premium si hay subs activa
     if user_id:
         sub = get_active_subscription(user_id)
@@ -58,8 +58,8 @@ def build_policy(visitor_id: str, user_id: str | None) -> Policy:
             )
 
         # Registrado sin plan
-        used = count_day_usage(visitor_id, user_id)
-        limit = 3
+        used = count_day_usage_by_ip(ip_hash) if ip_hash else count_day_usage(visitor_id, user_id)
+        limit = 2
         remaining = max(0, limit - used)
         return Policy(
             profile="free",
@@ -74,8 +74,8 @@ def build_policy(visitor_id: str, user_id: str | None) -> Policy:
         )
 
     # Guest
-    used = count_day_usage(visitor_id, None)
-    limit = 2
+    used = count_day_usage_by_ip(ip_hash) if ip_hash else count_day_usage(visitor_id, None)
+    limit = 1
     remaining = max(0, limit - used)
     return Policy(
         profile="guest",

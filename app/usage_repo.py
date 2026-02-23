@@ -43,7 +43,7 @@ def get_active_subscription(user_id: str):
                 SELECT plan_code, status, current_period_start, current_period_end
                 FROM subscriptions
                 WHERE user_id = %s
-                  AND status = 'active'
+                  AND status IN ('active', 'quota_exhausted')
                   AND current_period_end > NOW()
                 ORDER BY current_period_end DESC
                 LIMIT 1
@@ -139,6 +139,7 @@ def insert_usage_event(
     endpoint: str,
     allowed: bool,
     reason: str | None,
+    ip_hash: str | None,
 ):
     event_id = str(uuid4())
     with pool.connection() as conn:
@@ -147,12 +148,12 @@ def insert_usage_event(
                 """
                 INSERT INTO usage_events(
                   event_id, visitor_id, user_id, profile, plan_code, model_used,
-                  endpoint, allowed, reason, created_at
+                  endpoint, allowed, reason, ip_hash, created_at
                 )
-                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,NOW())
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,NOW())
                 """,
                 (event_id, visitor_id, user_id, profile, plan_code, model_used,
-                 endpoint, allowed, reason)
+                 endpoint, allowed, reason, ip_hash)
             )
         conn.commit()
 
@@ -169,3 +170,44 @@ def ensure_user(user_id: str):
                 (user_id,)
             )
         conn.commit()
+
+
+def mark_subscription_quota_exhausted(user_id: str):
+    """
+    Marca como quota_exhausted la suscripción activa vigente del usuario.
+    No toca suscripciones expiradas.
+    """
+    with pool.connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE subscriptions
+                SET status = 'quota_exhausted'
+                WHERE user_id = %s
+                  AND status = 'active'
+                  AND current_period_end > NOW()
+                """,
+                (user_id,),
+            )
+        conn.commit()
+
+
+def count_day_usage_by_ip(ip_hash: str) -> int:
+    now = datetime.now(tz=ZoneInfo("UTC"))
+    start_utc, end_utc = _day_window_mx(now)
+
+    with pool.connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT COUNT(*)
+                FROM usage_events
+                WHERE ip_hash = %s
+                  AND allowed = TRUE
+                  AND endpoint = '/consultar'
+                  AND created_at >= %s AND created_at < %s
+                """,
+                (ip_hash, start_utc, end_utc),
+            )
+            row = cur.fetchone()
+    return int(row[0]) if row else 0

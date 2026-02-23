@@ -6,7 +6,7 @@ from .cache import get_cache, MODEL_FLASH, MODEL_LITE
 from .ratelimit import limiter
 from .blocklist import check_ip_visitor
 from .ip_utils import get_client_ip
-from .usage_repo import upsert_visitor, insert_usage_event, ensure_user
+from .usage_repo import upsert_visitor, insert_usage_event, ensure_user, mark_subscription_quota_exhausted
 from .policy_service import build_policy
 from .db import pool
 
@@ -552,6 +552,7 @@ def policy(request: Request, response: Response, data: PolicyRequest):
 @limiter.limit("5/minute")
 def consultar(request: Request, response: Response, data: Consulta):
     ip = get_client_ip(request)
+    ip_hash = hash_ip(ip)
 
     visitor_id = _effective_visitor_id(request, data.visitor_id)
     if not visitor_id:
@@ -575,6 +576,7 @@ def consultar(request: Request, response: Response, data: Consulta):
             endpoint="/consultar",
             allowed=False,
             reason=f"blocked_short:{wait}s",
+            ip_hash=ip_hash,
         )
         raise HTTPException(status_code=429, detail=f"Bloqueado temporalmente. Intenta de nuevo en {wait}s.")
 
@@ -583,7 +585,7 @@ def consultar(request: Request, response: Response, data: Consulta):
 
     upsert_visitor(visitor_id, user_id)
 
-    pol = build_policy(visitor_id, user_id)
+    pol = build_policy(visitor_id, user_id, ip_hash)
     if pol.remaining <= 0:
         insert_usage_event(
             visitor_id=visitor_id,
@@ -594,7 +596,11 @@ def consultar(request: Request, response: Response, data: Consulta):
             endpoint="/consultar",
             allowed=False,
             reason="quota_exceeded",
+            ip_hash=ip_hash,
         )
+
+            if user_id:
+                mark_subscription_quota_exhausted(user_id)
         raise HTTPException(
             status_code=429,
             detail={"error": "QUOTA_EXCEEDED", "profile": pol.profile, "reset_at": pol.reset_at_iso, "remaining": 0},
@@ -627,6 +633,7 @@ def consultar(request: Request, response: Response, data: Consulta):
             endpoint="/consultar",
             allowed=False,
             reason=f"gemini_error:{type(e).__name__}:{str(e)[:180]}",
+            ip_hash=ip_hash,
         )
         raise HTTPException(status_code=502, detail="IA no disponible. Reintenta.")
 
@@ -644,6 +651,7 @@ def consultar(request: Request, response: Response, data: Consulta):
             endpoint="/consultar",
             allowed=False,
             reason=f"invalid_model_output:{bad_snip}",
+            ip_hash=ip_hash,
         )
         raise HTTPException(status_code=502, detail="Respuesta legal inválida. Reintenta.")
 
@@ -660,6 +668,7 @@ def consultar(request: Request, response: Response, data: Consulta):
             endpoint="/consultar",
             allowed=False,
             reason=f"json_parse_error:{bad_snip}",
+            ip_hash=ip_hash,
         )
         raise HTTPException(status_code=502, detail="Respuesta legal inválida. Reintenta.")
 
@@ -676,6 +685,7 @@ def consultar(request: Request, response: Response, data: Consulta):
         endpoint="/consultar",
         allowed=True,
         reason=None,
+        ip_hash=ip_hash,
     )
 
     resp = {
