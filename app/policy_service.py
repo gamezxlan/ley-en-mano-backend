@@ -6,6 +6,7 @@ from .usage_repo import (
     get_active_subscription,
     get_plan_quota,
     count_day_usage,
+    count_day_usage_by_ip,
     count_period_usage,
     MX_TZ,
 )
