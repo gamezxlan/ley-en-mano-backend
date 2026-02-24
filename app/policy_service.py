@@ -98,7 +98,7 @@ def build_policy(visitor_id: str, user_id: str | None, ip_hash: str | None) -> P
     remaining = max(0, limit - used)
     return Policy(
         profile="guest",
-        tier="guest"
+        tier="guest",
         model_kind="lite",
         response_mode="blindaje_only",
         cards_per_step="1",
