@@ -277,7 +277,7 @@ REGLAS:
 """
 
     if policy.profile == "premium" and getattr(policy, "tier", None) == "premium_basic":
-    return common + """
+        return common + """
 PERFIL: PREMIUM_BASIC
 SCHEMA ESTRICTO:
 {
