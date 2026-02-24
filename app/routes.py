@@ -599,8 +599,8 @@ def consultar(request: Request, response: Response, data: Consulta):
             ip_hash=ip_hash,
         )
 
-            if user_id:
-                mark_subscription_quota_exhausted(user_id)
+        if user_id:
+            mark_subscription_quota_exhausted(user_id)
         raise HTTPException(
             status_code=429,
             detail={"error": "QUOTA_EXCEEDED", "profile": pol.profile, "reset_at": pol.reset_at_iso, "remaining": 0},
