@@ -34,10 +34,25 @@ def upsert_visitor(visitor_id: str, user_id: str | None):
 
 def get_active_subscription(user_id: str):
     """
-    Regresa dict con plan_code, current_period_start, current_period_end si hay subs activa.
+    Regresa dict con plan_code, current_period_start, current_period_end si hay subs vigente.
+    Además expira ('expired') cualquier suscripción 'active' cuyo periodo ya terminó.
     """
     with pool.connection() as conn:
         with conn.cursor() as cur:
+
+            # 🔄 Expirar automáticamente suscripciones vencidas por tiempo
+            cur.execute(
+                """
+                UPDATE subscriptions
+                SET status = 'expired'
+                WHERE user_id = %s
+                  AND status = 'active'
+                  AND current_period_end <= NOW()
+                """,
+                (user_id,),
+            )
+
+            # 🔍 Buscar suscripción vigente
             cur.execute(
                 """
                 SELECT plan_code, status, current_period_start, current_period_end
@@ -48,11 +63,16 @@ def get_active_subscription(user_id: str):
                 ORDER BY current_period_end DESC
                 LIMIT 1
                 """,
-                (user_id,)
+                (user_id,),
             )
             row = cur.fetchone()
+
+        # ✅ IMPORTANTE: persistir el UPDATE
+        conn.commit()
+
     if not row:
         return None
+
     return {
         "plan_code": row[0],
         "status": row[1],
