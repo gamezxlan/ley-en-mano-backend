@@ -5,7 +5,7 @@ from google.genai import types
 from .cache import get_cache, MODEL_FLASH, MODEL_LITE
 from .ratelimit import limiter
 from .blocklist import check_ip_visitor
-from .ip_utils import get_client_ip
+from .ip_utils import get_client_ip, hash_ip
 from .usage_repo import upsert_visitor, insert_usage_event, ensure_user, mark_subscription_quota_exhausted
 from .policy_service import build_policy
 from .db import pool
@@ -490,7 +490,9 @@ def me(request: Request):
         ensure_user(user_id)
 
     upsert_visitor(visitor_id, user_id)
-    pol = build_policy(visitor_id, user_id)
+    ip = get_client_ip(request)
+    ip_hash = hash_ip(ip)
+    pol = build_policy(visitor_id, user_id, ip_hash)
     email = _get_user_email(user_id) if user_id else None
 
     return {
@@ -528,12 +530,16 @@ def policy(request: Request, response: Response, data: PolicyRequest):
     _set_visitor_cookie(response, visitor_id)
 
     user_id = _effective_user_id(request, data.user_id)
+    email = None
+
     if user_id:
         ensure_user(user_id)
         email = _get_user_email(user_id)
 
     upsert_visitor(visitor_id, user_id)
-    pol = build_policy(visitor_id, user_id)
+    ip = get_client_ip(request)
+    ip_hash = hash_ip(ip)
+    pol = build_policy(visitor_id, user_id, ip_hash)
 
     return {
         "visitor_id": visitor_id,
