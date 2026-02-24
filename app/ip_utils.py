@@ -1,5 +1,8 @@
 # app/ip_utils.py
+import os, hashlib
 from fastapi import Request
+
+IP_PEPPER = os.getenv("IP_PEPPER", "")  # setear en prod
 
 def get_client_ip(request: Request) -> str:
     """
@@ -19,3 +22,7 @@ def get_client_ip(request: Request) -> str:
 
     # fallback (proxy)
     return request.client.host if request.client else "unknown"
+
+def hash_ip(ip: str) -> str:
+    base = f"{IP_PEPPER}:{ip}" if IP_PEPPER else ip
+    return hashlib.sha256(base.encode("utf-8")).hexdigest()
