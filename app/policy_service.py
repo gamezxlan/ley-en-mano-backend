@@ -17,6 +17,7 @@ UTC = ZoneInfo("UTC")
 @dataclass
 class Policy:
     profile: str                 # 'guest' | 'free' | 'premium'
+    tier: str  # 'premium_basic' | 'premium_full' | 'free' | 'guest'
     model_kind: str              # 'lite' | 'flash'
     response_mode: str           # 'blindaje_only' | 'diagnostico_y_blindaje' | 'full'
     cards_per_step: str          # '1' | '2' | 'full'
@@ -46,8 +47,24 @@ def build_policy(visitor_id: str, user_id: str | None, ip_hash: str | None) -> P
             quota = get_plan_quota(plan_code)
             used = count_period_usage(user_id, sub["current_period_start"], sub["current_period_end"])
             remaining = max(0, quota - used)
+
+            if plan_code == "p99":
+                return Policy(
+                    profile="premium",
+                    tier="premium_basic",
+                    model_kind="flash",                 # 👈 distinto (opcional)
+                    response_mode="full_basic",  # 👈 distinto (opcional)
+                    cards_per_step="full",                # 👈 distinto (opcional)
+                    daily_limit=None,
+                    monthly_limit=quota,               # (aunque sea anual, es tu quota del periodo)
+                    remaining=remaining,
+                    reset_at_iso=sub["current_period_end"].astimezone(MX_TZ).isoformat(),
+                    plan_code=plan_code,
+                )
+
             return Policy(
                 profile="premium",
+                tier="premium_full",
                 model_kind="flash",
                 response_mode="full",
                 cards_per_step="full",
@@ -64,6 +81,7 @@ def build_policy(visitor_id: str, user_id: str | None, ip_hash: str | None) -> P
         remaining = max(0, limit - used)
         return Policy(
             profile="free",
+            tier="free",
             model_kind="lite",
             response_mode="diagnostico_y_blindaje",
             cards_per_step="1",
@@ -80,6 +98,7 @@ def build_policy(visitor_id: str, user_id: str | None, ip_hash: str | None) -> P
     remaining = max(0, limit - used)
     return Policy(
         profile="guest",
+        tier="guest"
         model_kind="lite",
         response_mode="blindaje_only",
         cards_per_step="1",

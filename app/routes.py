@@ -276,6 +276,53 @@ REGLAS:
 - Mantén paso_2_discurso con listas cortas (2–5 frases).
 """
 
+    if policy.profile == "premium" and getattr(policy, "tier", None) == "premium_basic":
+    return common + """
+PERFIL: PREMIUM_BASIC
+SCHEMA ESTRICTO:
+{
+  "Diagnóstico Jurídico": {
+    "resumen":"string",
+    "gravedad":"Alta|Media|Baja"
+  },
+  "Fundamento Táctico": [
+    {"ley":"string","articulo":"string","sustento":"string"}
+  ],
+  "Ruta de Blindaje": {
+    "paso_1_inmediato": [
+      {"titulo":"string","accion":"string","que_decir":"string"}
+    ],
+    "paso_2_discurso": {
+      "que_no_decir": ["string"],
+      "que_si_decir": ["string"]
+    },
+    "paso_3_denuncia": [
+      {"titulo":"string","accion":"string","que_decir":"string"}
+    ],
+    "paso_4_adicional": [
+      {"titulo":"string","accion":"string","que_decir":"string"}
+    ]
+  },
+  "Formato de Emergencia": {
+    "disponible": true,
+    "titulo": "string",
+    "campos": ["string"]
+  },
+  "Teléfono de contacto": [
+    {"Institucion":"string","contacto":"string","mision":"string"}
+  ]
+}
+REGLAS:
+- En Fundamento Táctico no juntes las leyes que aplican, explica cada una por separado.
+- Debes incluir SIEMPRE paso_1_inmediato, paso_2_discurso, paso_3_denuncia.
+- En paso_1_inmediato: puedes agregar mas acciones en la lista cuando sea necesario.
+- En paso_3_denuncia: puedes agregar mas denuncias en la lista cuando sea necesario.
+- Puedes agregar paso_4_adicional, paso_5_adicional, etc. cuando sea necesario.
+- Si no aplica Riesgos y Consecuencias, Formato de Emergencia o Teléfono, usa null (no inventar).
+- En campos de Formato de Emergencia, solo enlista los campos que son necesarios para llenar el formato
+"""
+
+
     # premium
     return common + """
 PERFIL: PREMIUM
@@ -479,6 +526,7 @@ def me(request: Request):
             "user_id": user_id,
             "email": email,  # ✅
             "profile": "guest" if not user_id else "free",
+            "tier": "guest" if not user_id else "free",  # ✅ NUEVO
             "plan_code": None,
             "remaining": None,
             "reset_at": None,
@@ -500,6 +548,7 @@ def me(request: Request):
         "user_id": user_id,
         "email": email,  # ✅
         "profile": pol.profile,
+        "tier": pol.tier,
         "plan_code": pol.plan_code,
         "limits": {"daily": pol.daily_limit, "monthly": pol.monthly_limit},
         "remaining": pol.remaining,
@@ -546,6 +595,7 @@ def policy(request: Request, response: Response, data: PolicyRequest):
         "user_id": user_id,
         "email": email,  # ✅
         "profile": pol.profile,
+        "tier": pol.tier,  # ✅ NUEVO
         "plan_code": pol.plan_code,
         "limits": {"daily": pol.daily_limit, "monthly": pol.monthly_limit},
         "remaining": pol.remaining,
@@ -698,6 +748,7 @@ def consultar(request: Request, response: Response, data: Consulta):
         "visitor_id": visitor_id,
         "user_id": user_id,
         "profile": pol.profile,
+        "tier": pol.tier,  # ✅ NUEVO
         "plan_code": pol.plan_code,
         "remaining_after": max(0, pol.remaining - 1),
         "reset_at": pol.reset_at_iso,
