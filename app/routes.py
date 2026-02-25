@@ -113,6 +113,15 @@ def _get_session_user_id(request: Request) -> str | None:
 
     return str(row[0])
 
+def _iso(dt) -> str | None:
+    if not dt:
+        return None
+    try:
+        return dt.astimezone(timezone.utc).isoformat()
+    except Exception:
+        # si ya viene como datetime con tz, isoformat igual funciona
+        return dt.isoformat()
+
 def _revoke_session(request: Request):
     sid = _get_cookie(request, SESSION_COOKIE_NAME)
     if not sid:
@@ -530,6 +539,9 @@ def me(request: Request):
             "plan_code": None,
             "remaining": None,
             "reset_at": None,
+            "subscription_status": None,
+            "subscription_start": None,
+            "subscription_end": None,
         }
 
     _validate_visitor_id(visitor_id)
@@ -542,6 +554,7 @@ def me(request: Request):
     ip_hash = hash_ip(ip)
     pol = build_policy(visitor_id, user_id, ip_hash)
     email = _get_user_email(user_id) if user_id else None
+    sub = get_active_subscription(user_id) if user_id else None
 
     return {
         "visitor_id": visitor_id,
@@ -555,6 +568,9 @@ def me(request: Request):
         "reset_at": pol.reset_at_iso,
         "model": "flash" if pol.model_kind == "flash" else "flash-lite",
         "response": {"mode": pol.response_mode, "cards_per_step": pol.cards_per_step},
+        "subscription_status": sub["status"] if sub else None,
+        "subscription_start": _iso(sub["current_period_start"]) if sub else None,
+        "subscription_end": _iso(sub["current_period_end"]) if sub else None,
     }
 
 @router.post("/logout")
@@ -589,6 +605,7 @@ def policy(request: Request, response: Response, data: PolicyRequest):
     ip = get_client_ip(request)
     ip_hash = hash_ip(ip)
     pol = build_policy(visitor_id, user_id, ip_hash)
+    sub = get_active_subscription(user_id) if user_id else None
 
     return {
         "visitor_id": visitor_id,
@@ -602,6 +619,9 @@ def policy(request: Request, response: Response, data: PolicyRequest):
         "reset_at": pol.reset_at_iso,
         "model": "flash" if pol.model_kind == "flash" else "flash-lite",
         "response": {"mode": pol.response_mode, "cards_per_step": pol.cards_per_step},
+        "subscription_status": sub["status"] if sub else None,
+        "subscription_start": _iso(sub["current_period_start"]) if sub else None,
+        "subscription_end": _iso(sub["current_period_end"]) if sub else None,
     }
 
 @router.post("/consultar")
@@ -620,6 +640,7 @@ def consultar(request: Request, response: Response, data: Consulta):
     user_id = _effective_user_id(request, data.user_id)
     if user_id:
         ensure_user(user_id)
+
 
     allowed, wait = check_ip_visitor(ip, visitor_id)
     if not allowed:
@@ -657,9 +678,10 @@ def consultar(request: Request, response: Response, data: Consulta):
 
         if user_id:
             mark_subscription_quota_exhausted(user_id)
+            sub = get_active_subscription(user_id) if user_id else None
         raise HTTPException(
             status_code=429,
-            detail={"error": "QUOTA_EXCEEDED", "profile": pol.profile, "reset_at": pol.reset_at_iso, "remaining": 0},
+            detail={"error": "QUOTA_EXCEEDED", "profile": pol.profile, "reset_at": pol.reset_at_iso, "remaining": 0, "subscription_end": _iso(sub["current_period_end"]) if sub else None},
         )
 
     cache_kind = "flash" if pol.model_kind == "flash" else "lite"
@@ -753,6 +775,7 @@ def consultar(request: Request, response: Response, data: Consulta):
         "remaining_after": max(0, pol.remaining - 1),
         "reset_at": pol.reset_at_iso,
         "respuesta": obj,
+        "subscription_end": _iso(sub["current_period_end"]) if sub else None,
     }
 
     if os.getenv("ENV") != "production":

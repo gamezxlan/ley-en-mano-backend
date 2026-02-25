@@ -26,6 +26,9 @@ class Policy:
     remaining: int
     reset_at_iso: str
     plan_code: str | None
+    subscription_status: str | None = None
+    subscription_start_iso: str | None = None
+    subscription_end_iso: str | None = None
 
 
 def _reset_at_daily_iso():
@@ -47,6 +50,9 @@ def build_policy(visitor_id: str, user_id: str | None, ip_hash: str | None) -> P
             quota = get_plan_quota(plan_code)
             used = count_period_usage(user_id, sub["current_period_start"], sub["current_period_end"])
             remaining = max(0, quota - used)
+            start_iso = sub["current_period_start"].astimezone(MX_TZ).isoformat()
+            end_iso = sub["current_period_end"].astimezone(MX_TZ).isoformat()
+            status = sub.get("status")
 
             if plan_code == "p99":
                 return Policy(
@@ -60,6 +66,9 @@ def build_policy(visitor_id: str, user_id: str | None, ip_hash: str | None) -> P
                     remaining=remaining,
                     reset_at_iso=sub["current_period_end"].astimezone(MX_TZ).isoformat(),
                     plan_code=plan_code,
+                    subscription_status=status,
+                    subscription_start_iso=start_iso,
+                    subscription_end_iso=end_iso,
                 )
 
             return Policy(
@@ -73,6 +82,9 @@ def build_policy(visitor_id: str, user_id: str | None, ip_hash: str | None) -> P
                 remaining=remaining,
                 reset_at_iso=sub["current_period_end"].astimezone(MX_TZ).isoformat(),
                 plan_code=plan_code,
+                subscription_status=status,
+                subscription_start_iso=start_iso,
+                subscription_end_iso=end_iso,
             )
 
         # Registrado sin plan
@@ -90,6 +102,9 @@ def build_policy(visitor_id: str, user_id: str | None, ip_hash: str | None) -> P
             remaining=remaining,
             reset_at_iso=_reset_at_daily_iso(),
             plan_code=None,
+            subscription_status=None,
+            subscription_start_iso=None,
+            subscription_end_iso=None,
         )
 
     # Guest
@@ -107,4 +122,7 @@ def build_policy(visitor_id: str, user_id: str | None, ip_hash: str | None) -> P
         remaining=remaining,
         reset_at_iso=_reset_at_daily_iso(),
         plan_code=None,
+        subscription_status=None,
+        subscription_start_iso=None,
+        subscription_end_iso=None,
     )
