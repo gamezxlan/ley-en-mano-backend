@@ -5,3 +5,4 @@ python-dotenv
 slowapi
 psycopg[binary]==3.*
 psycopg-pool==3.*
+stripe>=10.0.0
