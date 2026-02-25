@@ -9,20 +9,11 @@ from datetime import datetime, timezone
 import stripe
 from .db import pool
 
-etype = event["type"]
-print("STRIPE WEBHOOK:", etype)
-
-if etype == "checkout.session.completed":
-    session = event["data"]["object"]
-    print("session.id:", session.get("id"))
-    print("session.subscription:", session.get("subscription"))
-    print("session.customer:", session.get("customer"))
-    print("metadata:", session.get("metadata"))
-
 router = APIRouter(prefix="/billing", tags=["billing-webhook"])
 
 stripe.api_key = os.environ["STRIPE_SECRET_KEY"]
 WEBHOOK_SECRET = os.environ["STRIPE_WEBHOOK_SECRET"]
+
 
 def _dt_from_unix(ts: int | None) -> datetime | None:
     if ts is None:
@@ -31,6 +22,7 @@ def _dt_from_unix(ts: int | None) -> datetime | None:
         return datetime.fromtimestamp(int(ts), tz=timezone.utc)
     except Exception:
         return None
+
 
 def _ensure_user_exists(user_id: str):
     with pool.connection() as conn:
@@ -44,6 +36,7 @@ def _ensure_user_exists(user_id: str):
                 (user_id,),
             )
         conn.commit()
+
 
 def _map_stripe_status(s: str | None) -> str:
     st = (s or "").lower().strip()
@@ -60,6 +53,7 @@ def _map_stripe_status(s: str | None) -> str:
     if not st:
         return "active"
     return st
+
 
 def _deactivate_other_active_subs(user_id: str, keep_stripe_sub_id: str | None):
     # para respetar tu índice ux_one_active_sub_per_user
@@ -88,6 +82,7 @@ def _deactivate_other_active_subs(user_id: str, keep_stripe_sub_id: str | None):
                 )
         conn.commit()
 
+
 def _upsert_subscription_from_stripe(
     *,
     user_id: str,
@@ -103,7 +98,7 @@ def _upsert_subscription_from_stripe(
     """
     Idempotente:
     - Primero “desactiva” otras active del mismo user (para no violar ux_one_active_sub_per_user)
-    - Luego UPSERT por stripe_subscription_id (tu ux_subs_stripe_subscription lo soporta)
+    - Luego UPSERT por stripe_subscription_id (requiere UNIQUE/EXCLUSION en stripe_subscription_id)
     """
     _deactivate_other_active_subs(user_id, stripe_subscription_id)
 
@@ -129,12 +124,20 @@ def _upsert_subscription_from_stripe(
                   stripe_checkout_session_id = COALESCE(EXCLUDED.stripe_checkout_session_id, subscriptions.stripe_checkout_session_id)
                 """,
                 (
-                    str(uuid4()), user_id, plan_code, local_status,
-                    period_start, period_end,
-                    stripe_customer_id, stripe_subscription_id, stripe_price_id, stripe_checkout_session_id
+                    str(uuid4()),
+                    user_id,
+                    plan_code,
+                    local_status,
+                    period_start,
+                    period_end,
+                    stripe_customer_id,
+                    stripe_subscription_id,
+                    stripe_price_id,
+                    stripe_checkout_session_id,
                 ),
             )
         conn.commit()
+
 
 def _update_subscription_status_by_stripe_sub(stripe_subscription_id: str, new_status: str):
     with pool.connection() as conn:
@@ -148,6 +151,22 @@ def _update_subscription_status_by_stripe_sub(stripe_subscription_id: str, new_s
                 (new_status, stripe_subscription_id),
             )
         conn.commit()
+
+
+def _update_periods_by_stripe_sub(stripe_subscription_id: str, period_start: datetime, period_end: datetime):
+    with pool.connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE subscriptions
+                SET current_period_start = %s,
+                    current_period_end = %s
+                WHERE stripe_subscription_id = %s
+                """,
+                (period_start, period_end, stripe_subscription_id),
+            )
+        conn.commit()
+
 
 @router.post("/webhook")
 async def stripe_webhook(request: Request):
@@ -165,11 +184,18 @@ async def stripe_webhook(request: Request):
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid webhook signature")
 
-    etype = event["type"]
+    etype = event.get("type")
+    print("STRIPE WEBHOOK:", etype)
 
     # 1) Checkout completado
     if etype == "checkout.session.completed":
         session = event["data"]["object"]
+
+        print("session.id:", session.get("id"))
+        print("session.subscription:", session.get("subscription"))
+        print("session.customer:", session.get("customer"))
+        print("metadata:", session.get("metadata"))
+
         md = session.get("metadata") or {}
         user_id = (md.get("user_id") or "").strip()
         plan_code = (md.get("plan_code") or "").strip().lower()
@@ -186,25 +212,28 @@ async def stripe_webhook(request: Request):
         if not stripe_subscription_id:
             return {"ok": True}
 
+        # Traemos la sub para periodos + status real
         try:
             sub = stripe.Subscription.retrieve(stripe_subscription_id)
-            print("sub.status:", sub.get("status"))
-            print("sub.current_period_start:", sub.get("current_period_start"))
-            print("sub.current_period_end:", sub.get("current_period_end"))
-            period_start = _dt_from_unix(sub.get("current_period_start"))
-            period_end = _dt_from_unix(sub.get("current_period_end"))
-
-            if not period_start or not period_end:
-                # 👇 NO escribas en DB si Stripe no da periodo real
-                return {"ok": True}
-        except Exception:
+        except Exception as e:
+            print("stripe.Subscription.retrieve failed:", str(e))
             return {"ok": True}
+
+        print("sub.status:", sub.get("status"))
+        print("sub.current_period_start:", sub.get("current_period_start"))
+        print("sub.current_period_end:", sub.get("current_period_end"))
 
         period_start = _dt_from_unix(sub.get("current_period_start"))
         period_end = _dt_from_unix(sub.get("current_period_end"))
+
+        # Si Stripe aún no puso periodos, NO escribimos; lo arreglará subscription.updated
+        if not period_start or not period_end:
+            print("No period dates yet; skipping DB write (will rely on subscription.updated).")
+            return {"ok": True}
+
         local_status = _map_stripe_status(sub.get("status"))
 
-        # price_id: viene en items.data[0].price.id normalmente
+        # price_id
         price_id = None
         try:
             items = (sub.get("items") or {}).get("data") or []
@@ -226,13 +255,18 @@ async def stripe_webhook(request: Request):
         )
         return {"ok": True}
 
-    # 2) Cambios de suscripción (recomendado)
+    # 2) Cambios de suscripción (MUY recomendado para sincronía)
     if etype == "customer.subscription.updated":
         sub = event["data"]["object"]
         stripe_subscription_id = sub.get("id")
         if stripe_subscription_id:
             local_status = _map_stripe_status(sub.get("status"))
             _update_subscription_status_by_stripe_sub(stripe_subscription_id, local_status)
+
+            ps = _dt_from_unix(sub.get("current_period_start"))
+            pe = _dt_from_unix(sub.get("current_period_end"))
+            if ps and pe:
+                _update_periods_by_stripe_sub(stripe_subscription_id, ps, pe)
         return {"ok": True}
 
     # 3) Pago fallido
