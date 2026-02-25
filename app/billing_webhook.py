@@ -9,6 +9,16 @@ from datetime import datetime, timezone
 import stripe
 from .db import pool
 
+etype = event["type"]
+print("STRIPE WEBHOOK:", etype)
+
+if etype == "checkout.session.completed":
+    session = event["data"]["object"]
+    print("session.id:", session.get("id"))
+    print("session.subscription:", session.get("subscription"))
+    print("session.customer:", session.get("customer"))
+    print("metadata:", session.get("metadata"))
+
 router = APIRouter(prefix="/billing", tags=["billing-webhook"])
 
 stripe.api_key = os.environ["STRIPE_SECRET_KEY"]
@@ -178,6 +188,9 @@ async def stripe_webhook(request: Request):
 
         try:
             sub = stripe.Subscription.retrieve(stripe_subscription_id)
+            print("sub.status:", sub.get("status"))
+            print("sub.current_period_start:", sub.get("current_period_start"))
+            print("sub.current_period_end:", sub.get("current_period_end"))
             period_start = _dt_from_unix(sub.get("current_period_start"))
             period_end = _dt_from_unix(sub.get("current_period_end"))
 
