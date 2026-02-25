@@ -14,10 +14,13 @@ router = APIRouter(prefix="/billing", tags=["billing-webhook"])
 stripe.api_key = os.environ["STRIPE_SECRET_KEY"]
 WEBHOOK_SECRET = os.environ["STRIPE_WEBHOOK_SECRET"]
 
-def _dt_from_unix(ts: int | None) -> datetime:
-    if not ts:
-        return datetime.now(timezone.utc)
-    return datetime.fromtimestamp(int(ts), tz=timezone.utc)
+def _dt_from_unix(ts: int | None) -> datetime | None:
+    if ts is None:
+        return None
+    try:
+        return datetime.fromtimestamp(int(ts), tz=timezone.utc)
+    except Exception:
+        return None
 
 def _ensure_user_exists(user_id: str):
     with pool.connection() as conn:
@@ -38,11 +41,14 @@ def _map_stripe_status(s: str | None) -> str:
         return "active"
     if st in ("past_due", "unpaid"):
         return "past_due"
-    if st == "canceled":
+    if st in ("canceled", "cancelled"):
         return "canceled"
+    if st in ("incomplete_expired",):
+        return "expired"
+    if st in ("incomplete",):
+        return "incomplete"
     if not st:
         return "active"
-    # fallback: guarda lo que venga (pero no cuenta como premium porque tu get_active_subscription filtra)
     return st
 
 def _deactivate_other_active_subs(user_id: str, keep_stripe_sub_id: str | None):
@@ -172,6 +178,12 @@ async def stripe_webhook(request: Request):
 
         try:
             sub = stripe.Subscription.retrieve(stripe_subscription_id)
+            period_start = _dt_from_unix(sub.get("current_period_start"))
+            period_end = _dt_from_unix(sub.get("current_period_end"))
+
+            if not period_start or not period_end:
+                # 👇 NO escribas en DB si Stripe no da periodo real
+                return {"ok": True}
         except Exception:
             return {"ok": True}
 
