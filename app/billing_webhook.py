@@ -210,6 +210,16 @@ def _upsert_from_subscription_event(sub: dict, checkout_session_id: str | None =
         stripe_checkout_session_id=checkout_session_id,
     )
 
+def _periods_from_invoice_object(inv: dict) -> tuple[datetime | None, datetime | None]:
+    try:
+        lines = (inv.get("lines") or {}).get("data") or []
+        if lines and lines[0].get("period"):
+            ps = _dt_from_unix(lines[0]["period"].get("start"))
+            pe = _dt_from_unix(lines[0]["period"].get("end"))
+            return ps, pe
+    except Exception:
+        pass
+    return None, None
 
 @router.post("/webhook")
 async def stripe_webhook(request: Request):
@@ -240,6 +250,80 @@ async def stripe_webhook(request: Request):
             _upsert_from_subscription_event(sub, checkout_session_id=None)
         except Exception as e:
             print("upsert_from_subscription_event failed:", type(e).__name__, str(e)[:200])
+        return {"ok": True}
+
+        # ✅ Checkout completado: aquí SÍ tenemos metadata (user_id/plan_code)
+    if etype == "checkout.session.completed":
+        session = obj
+        md = session.get("metadata") or {}
+        user_id = (md.get("user_id") or "").strip()
+        plan_code = (md.get("plan_code") or "").strip().lower()
+
+        print("checkout.md:", md)
+        print("checkout.subscription:", session.get("subscription"))
+
+        if not user_id or not plan_code:
+            return {"ok": True}
+
+        _ensure_user_exists(user_id)
+
+        stripe_checkout_session_id = session.get("id")
+        stripe_customer_id = session.get("customer")
+        stripe_subscription_id = session.get("subscription")
+
+        if not stripe_subscription_id:
+            return {"ok": True}
+
+        # Traemos subscription + latest_invoice expandido
+        try:
+            sub = stripe.Subscription.retrieve(
+                stripe_subscription_id,
+                expand=["latest_invoice.lines.data", "items.data.price"],
+            )
+        except Exception as e:
+            print("Subscription.retrieve failed:", type(e).__name__, str(e)[:200])
+            return {"ok": True}
+
+        ps = _dt_from_unix(sub.get("current_period_start"))
+        pe = _dt_from_unix(sub.get("current_period_end"))
+
+        # ✅ fallback: periodos desde latest_invoice
+        if (not ps or not pe):
+            latest_inv = sub.get("latest_invoice")
+            if isinstance(latest_inv, dict):
+                ps2, pe2 = _periods_from_invoice_object(latest_inv)
+                ps = ps or ps2
+                pe = pe or pe2
+
+        print("sub.status:", sub.get("status"))
+        print("sub.periods:", sub.get("current_period_start"), sub.get("current_period_end"))
+        print("computed periods:", ps, pe)
+
+        if not ps or not pe:
+            return {"ok": True}
+
+        local_status = _map_stripe_status(sub.get("status"))
+
+        price_id = None
+        try:
+            items = (sub.get("items") or {}).get("data") or []
+            if items and items[0].get("price"):
+                price_id = items[0]["price"].get("id")
+        except Exception:
+            pass
+
+        _upsert_subscription_from_stripe(
+            user_id=user_id,
+            plan_code=plan_code,
+            local_status=local_status,
+            period_start=ps,
+            period_end=pe,
+            stripe_customer_id=stripe_customer_id,
+            stripe_subscription_id=stripe_subscription_id,
+            stripe_price_id=price_id,
+            stripe_checkout_session_id=stripe_checkout_session_id,
+        )
+        print("DB UPSERT OK for:", stripe_subscription_id)
         return {"ok": True}
 
     # 2) Pagos / invoice: asegura periodos (fallback desde invoice.lines)

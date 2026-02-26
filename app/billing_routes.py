@@ -116,6 +116,7 @@ def create_checkout_session(request: Request, body: CheckoutRequest):
             cancel_url=cancel_url,
             customer_email=email if email else None,
             allow_promotion_codes=True,
+            client_reference_id=user_id,
             # ✅ importantísimo para que el webhook sepa a quién activar
             metadata={
                 "user_id": user_id,
