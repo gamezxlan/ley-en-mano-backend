@@ -14,6 +14,13 @@ router = APIRouter(prefix="/billing", tags=["billing-webhook"])
 stripe.api_key = os.environ["STRIPE_SECRET_KEY"]
 WEBHOOK_SECRET = os.environ["STRIPE_WEBHOOK_SECRET"]
 
+# ✅ price_id real -> plan_code (fuente de verdad para upgrades via Portal)
+PRICE_TO_PLAN = {
+    os.environ.get("STRIPE_PRICE_P99"): "p99",
+    os.environ.get("STRIPE_PRICE_P199"): "p199",
+}
+PRICE_TO_PLAN = {k: v for k, v in PRICE_TO_PLAN.items() if k}
+
 
 def _dt_from_unix(ts: int | None) -> datetime | None:
     if ts is None:
@@ -22,6 +29,34 @@ def _dt_from_unix(ts: int | None) -> datetime | None:
         return datetime.fromtimestamp(int(ts), tz=timezone.utc)
     except Exception:
         return None
+
+
+def _get_price_id_from_sub(sub: dict) -> str | None:
+    try:
+        items = (sub.get("items") or {}).get("data") or []
+        if items and items[0].get("price"):
+            return items[0]["price"].get("id")
+    except Exception:
+        pass
+    return None
+
+
+def _resolve_plan_code(sub: dict) -> str | None:
+    """
+    ✅ IMPORTANTE:
+    - En upgrades por Stripe Portal, la metadata 'plan_code' puede quedarse vieja (p99).
+    - Por eso: primero resolvemos por price_id real, y solo si no se puede, usamos metadata.
+    """
+    price_id = _get_price_id_from_sub(sub)
+    if price_id and price_id in PRICE_TO_PLAN:
+        return PRICE_TO_PLAN[price_id]
+
+    md = sub.get("metadata") or {}
+    pc = (md.get("plan_code") or "").strip().lower()
+    if pc in ("p99", "p199"):
+        return pc
+
+    return None
 
 
 def _ensure_user_exists(user_id: str):
@@ -97,8 +132,8 @@ def _upsert_subscription_from_stripe(
 ):
     """
     Idempotente:
-    - Primero “desactiva” otras active del mismo user (para no violar ux_one_active_sub_per_user)
-    - Luego UPSERT por stripe_subscription_id (requiere UNIQUE/EXCLUSION en stripe_subscription_id)
+    - desactiva otras active del mismo user
+    - UPSERT por stripe_subscription_id (requiere UNIQUE en stripe_subscription_id)
     """
     _deactivate_other_active_subs(user_id, stripe_subscription_id)
 
@@ -167,16 +202,16 @@ def _update_periods_by_stripe_sub(stripe_subscription_id: str, period_start: dat
             )
         conn.commit()
 
+
 def _upsert_from_subscription_event(sub: dict, checkout_session_id: str | None = None):
     stripe_subscription_id = sub.get("id")
     stripe_customer_id = sub.get("customer")
 
     md = sub.get("metadata") or {}
     user_id = (md.get("user_id") or "").strip()
-    plan_code = (md.get("plan_code") or "").strip().lower()
 
+    plan_code = _resolve_plan_code(sub)
     if not user_id or not plan_code or not stripe_subscription_id:
-        # sin metadata no podemos asociar
         return
 
     _ensure_user_exists(user_id)
@@ -186,17 +221,10 @@ def _upsert_from_subscription_event(sub: dict, checkout_session_id: str | None =
     ps = _dt_from_unix(sub.get("current_period_start"))
     pe = _dt_from_unix(sub.get("current_period_end"))
     if not ps or not pe:
-        # si aún no hay periodos, no escribimos (lo rescata invoice.payment_succeeded)
+        # lo rescata invoice.payment_succeeded
         return
 
-    # price_id
-    price_id = None
-    try:
-        items = (sub.get("items") or {}).get("data") or []
-        if items and items[0].get("price"):
-            price_id = items[0]["price"].get("id")
-    except Exception:
-        pass
+    price_id = _get_price_id_from_sub(sub)
 
     _upsert_subscription_from_stripe(
         user_id=user_id,
@@ -210,6 +238,7 @@ def _upsert_from_subscription_event(sub: dict, checkout_session_id: str | None =
         stripe_checkout_session_id=checkout_session_id,
     )
 
+
 def _periods_from_invoice_object(inv: dict) -> tuple[datetime | None, datetime | None]:
     try:
         lines = (inv.get("lines") or {}).get("data") or []
@@ -220,6 +249,7 @@ def _periods_from_invoice_object(inv: dict) -> tuple[datetime | None, datetime |
     except Exception:
         pass
     return None, None
+
 
 @router.post("/webhook")
 async def stripe_webhook(request: Request):
@@ -247,22 +277,23 @@ async def stripe_webhook(request: Request):
     if etype in ("customer.subscription.created", "customer.subscription.updated"):
         sub = obj
         try:
+            # debug útil para verificar upgrade por price
+            print("SUB price_id:", _get_price_id_from_sub(sub), "resolved_plan:", _resolve_plan_code(sub))
             _upsert_from_subscription_event(sub, checkout_session_id=None)
         except Exception as e:
             print("upsert_from_subscription_event failed:", type(e).__name__, str(e)[:200])
         return {"ok": True}
 
-        # ✅ Checkout completado: aquí SÍ tenemos metadata (user_id/plan_code)
+    # 2) Checkout completado (opcional): asegura stripe_checkout_session_id en DB
     if etype == "checkout.session.completed":
         session = obj
         md = session.get("metadata") or {}
         user_id = (md.get("user_id") or "").strip()
-        plan_code = (md.get("plan_code") or "").strip().lower()
 
         print("checkout.md:", md)
         print("checkout.subscription:", session.get("subscription"))
 
-        if not user_id or not plan_code:
+        if not user_id:
             return {"ok": True}
 
         _ensure_user_exists(user_id)
@@ -274,7 +305,6 @@ async def stripe_webhook(request: Request):
         if not stripe_subscription_id:
             return {"ok": True}
 
-        # Traemos subscription + latest_invoice expandido
         try:
             sub = stripe.Subscription.retrieve(
                 stripe_subscription_id,
@@ -287,7 +317,7 @@ async def stripe_webhook(request: Request):
         ps = _dt_from_unix(sub.get("current_period_start"))
         pe = _dt_from_unix(sub.get("current_period_end"))
 
-        # ✅ fallback: periodos desde latest_invoice
+        # fallback: periodos desde latest_invoice
         if (not ps or not pe):
             latest_inv = sub.get("latest_invoice")
             if isinstance(latest_inv, dict):
@@ -295,22 +325,15 @@ async def stripe_webhook(request: Request):
                 ps = ps or ps2
                 pe = pe or pe2
 
-        print("sub.status:", sub.get("status"))
-        print("sub.periods:", sub.get("current_period_start"), sub.get("current_period_end"))
-        print("computed periods:", ps, pe)
-
         if not ps or not pe:
             return {"ok": True}
 
-        local_status = _map_stripe_status(sub.get("status"))
+        plan_code = _resolve_plan_code(sub)  # ✅ por price primero
+        if not plan_code:
+            return {"ok": True}
 
-        price_id = None
-        try:
-            items = (sub.get("items") or {}).get("data") or []
-            if items and items[0].get("price"):
-                price_id = items[0]["price"].get("id")
-        except Exception:
-            pass
+        local_status = _map_stripe_status(sub.get("status"))
+        price_id = _get_price_id_from_sub(sub)
 
         _upsert_subscription_from_stripe(
             user_id=user_id,
@@ -326,7 +349,7 @@ async def stripe_webhook(request: Request):
         print("DB UPSERT OK for:", stripe_subscription_id)
         return {"ok": True}
 
-    # 2) Pagos / invoice: asegura periodos (fallback desde invoice.lines)
+    # 3) Pagos / invoice: asegura periodos y también plan_code por price
     if etype in ("invoice.paid", "invoice.payment_succeeded"):
         inv = obj
         stripe_subscription_id = inv.get("subscription")
@@ -336,16 +359,21 @@ async def stripe_webhook(request: Request):
             return {"ok": True}
 
         try:
-            sub = stripe.Subscription.retrieve(stripe_subscription_id)
+            sub = stripe.Subscription.retrieve(
+                stripe_subscription_id,
+                expand=["items.data.price"],
+            )
         except Exception as e:
             print("Subscription.retrieve failed:", str(e))
             return {"ok": True}
 
         md = sub.get("metadata") or {}
         user_id = (md.get("user_id") or "").strip()
-        plan_code = (md.get("plan_code") or "").strip().lower()
+        if not user_id:
+            return {"ok": True}
 
-        if not user_id or not plan_code:
+        plan_code = _resolve_plan_code(sub)  # ✅ por price primero
+        if not plan_code:
             return {"ok": True}
 
         _ensure_user_exists(user_id)
@@ -353,28 +381,17 @@ async def stripe_webhook(request: Request):
         ps = _dt_from_unix(sub.get("current_period_start"))
         pe = _dt_from_unix(sub.get("current_period_end"))
 
-        # ✅ Fallback: periodos del invoice
+        # fallback: periodos del invoice
         if (not ps or not pe):
-            try:
-                lines = (inv.get("lines") or {}).get("data") or []
-                if lines and lines[0].get("period"):
-                    ps = _dt_from_unix(lines[0]["period"].get("start"))
-                    pe = _dt_from_unix(lines[0]["period"].get("end"))
-            except Exception:
-                pass
+            ps2, pe2 = _periods_from_invoice_object(inv)
+            ps = ps or ps2
+            pe = pe or pe2
 
         if not ps or not pe:
             return {"ok": True}
 
         local_status = _map_stripe_status(sub.get("status"))
-
-        price_id = None
-        try:
-            items = (sub.get("items") or {}).get("data") or []
-            if items and items[0].get("price"):
-                price_id = items[0]["price"].get("id")
-        except Exception:
-            pass
+        price_id = _get_price_id_from_sub(sub)
 
         _upsert_subscription_from_stripe(
             user_id=user_id,
@@ -387,12 +404,9 @@ async def stripe_webhook(request: Request):
             stripe_price_id=price_id,
             stripe_checkout_session_id=None,
         )
-        print("inv.lines:", (inv.get("lines") or {}).get("data")[:1])
-        print("sub.current_period_start:", sub.get("current_period_start"))
-        print("sub.current_period_end:", sub.get("current_period_end"))
         return {"ok": True}
 
-    # 3) Pago fallido
+    # 4) Pago fallido
     if etype == "invoice.payment_failed":
         inv = obj
         stripe_subscription_id = inv.get("subscription")
@@ -400,7 +414,7 @@ async def stripe_webhook(request: Request):
             _update_subscription_status_by_stripe_sub(stripe_subscription_id, "past_due")
         return {"ok": True}
 
-    # 4) Suscripción eliminada
+    # 5) Suscripción eliminada
     if etype == "customer.subscription.deleted":
         sub = obj
         stripe_subscription_id = sub.get("id")
@@ -408,5 +422,4 @@ async def stripe_webhook(request: Request):
             _update_subscription_status_by_stripe_sub(stripe_subscription_id, "canceled")
         return {"ok": True}
 
-    # 5) checkout.session.completed lo puedes manejar o ignorar (ya no es necesario para DB)
     return {"ok": True}
