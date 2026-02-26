@@ -56,44 +56,45 @@ def _get_active_stripe_subscription_id(user_id: str) -> str | None:
             return str(row[0]) if row and row[0] else None
 
 @router.post("/portal")
-def create_portal_session(request: Request, body: PortalRequest):
+def create_portal_session(request: Request, body: dict):
     user_id = _get_session_user_id(request)
     if not user_id:
         raise HTTPException(status_code=401, detail="No autenticado")
 
-    target = (body.target_plan or "").strip().lower()
-    if target not in PRICE_BY_PLAN:
+    target_plan = (body.get("target_plan") or "").lower()
+    if target_plan not in PLAN_TO_PRICE:
         raise HTTPException(status_code=400, detail="target_plan inválido")
 
-    # Necesitamos customer + subscription para poder “abrir directamente” el upgrade con prorrateo.
     stripe_customer_id = _get_active_stripe_customer_id(user_id)
     stripe_subscription_id = _get_active_stripe_subscription_id(user_id)
 
     if not stripe_customer_id or not stripe_subscription_id:
-        raise HTTPException(status_code=409, detail="No hay suscripción activa para mejorar")
+        raise HTTPException(
+            status_code=409,
+            detail="No hay una suscripción activa para mejorar",
+        )
 
-    target_price_id = PRICE_BY_PLAN[target]
+    target_price_id = PLAN_TO_PRICE[target_plan]
 
-    # Stripe necesita el subscription_item id (el item actual) para cambiar el price
+    # Traemos subscription + item id
     try:
-        sub = stripe.Subscription.retrieve(stripe_subscription_id, expand=["items.data"])
+        sub = stripe.Subscription.retrieve(
+            stripe_subscription_id,
+            expand=["items.data"],
+        )
     except Exception as e:
-        raise HTTPException(status_code=502, detail=f"Stripe error: {type(e).__name__}")
+        raise HTTPException(status_code=502, detail="No se pudo leer la suscripción")
 
     items = (sub.get("items") or {}).get("data") or []
-    if not items:
-        raise HTTPException(status_code=409, detail="Suscripción sin items")
+    if not items or not items[0].get("id"):
+        raise HTTPException(status_code=409, detail="Suscripción sin item")
 
-    subscription_item_id = items[0].get("id")
-    if not subscription_item_id:
-        raise HTTPException(status_code=409, detail="Suscripción sin item id")
+    subscription_item_id = items[0]["id"]
 
-    # Return URL: a dónde vuelve Stripe portal
     return_url = f"{FRONTEND_BASE_URL}/?billing=ok"
 
-    # ✅ Portal con “flow_data” para abrir directo en update_subscription con el nuevo price
     try:
-        ps = stripe.billing_portal.Session.create(
+        portal = stripe.billing_portal.Session.create(
             customer=stripe_customer_id,
             return_url=return_url,
             flow_data={
@@ -110,6 +111,6 @@ def create_portal_session(request: Request, body: PortalRequest):
             },
         )
     except Exception as e:
-        raise HTTPException(status_code=502, detail=f"Stripe error: {type(e).__name__}")
+        raise HTTPException(status_code=502, detail="Stripe portal error")
 
-    return {"url": ps.url}
+    return {"url": portal.url}
