@@ -102,7 +102,7 @@ def create_portal_session(request: Request, body: PortalRequest):
         subscription_item_id = items[0]["id"]
 
         # 2) Crear portal session en modo subscription_update
-        # Stripe aquí calcula prorrateo automáticamente según tu configuración de proration
+        # Stripe aquí calcula prorrateo automáticamente según tu configuración de proration coment
         portal = stripe.billing_portal.Session.create(
             customer=stripe_customer_id,
             return_url=return_url,
