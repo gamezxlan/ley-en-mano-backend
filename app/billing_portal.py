@@ -5,29 +5,24 @@ from fastapi import APIRouter, Request, HTTPException
 from pydantic import BaseModel
 import os
 import stripe
-from stripe import error as stripe_error
 
 from .db import pool
-from .billing_routes import _get_session_user_id  # usa el que ya tienes ahí
+from .billing_routes import _get_session_user_id  # <- importa el helper donde lo tienes
 
 router = APIRouter(prefix="/billing", tags=["billing-portal"])
 
 stripe.api_key = os.environ["STRIPE_SECRET_KEY"]
 FRONTEND_BASE_URL = os.getenv("FRONTEND_BASE_URL", "http://localhost:5173")
 
-PRICE_P99 = os.environ["STRIPE_PRICE_P99"]
-PRICE_P199 = os.environ["STRIPE_PRICE_P199"]
-
-PLAN_TO_PRICE = {
-    "p99": PRICE_P99,
-    "p199": PRICE_P199,
+PRICE_BY_PLAN = {
+    "p99": os.environ["STRIPE_PRICE_P99"],
+    "p199": os.environ["STRIPE_PRICE_P199"],
 }
 
 class PortalRequest(BaseModel):
     target_plan: str  # "p199" por ahora
 
-
-def _get_active_stripe_customer_id(user_id: str) -> str | None:
+def _get_latest_stripe_customer_id(user_id: str) -> str | None:
     with pool.connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
@@ -42,8 +37,7 @@ def _get_active_stripe_customer_id(user_id: str) -> str | None:
                 (user_id,),
             )
             row = cur.fetchone()
-            return str(row[0]) if row and row[0] else None
-
+    return str(row[0]) if row and row[0] else None
 
 def _get_active_stripe_subscription_id(user_id: str) -> str | None:
     with pool.connection() as conn:
@@ -61,18 +55,7 @@ def _get_active_stripe_subscription_id(user_id: str) -> str | None:
                 (user_id,),
             )
             row = cur.fetchone()
-            return str(row[0]) if row and row[0] else None
-
-
-def _get_current_price_id(sub: dict) -> str | None:
-    try:
-        items = (sub.get("items") or {}).get("data") or []
-        if items and items[0].get("price"):
-            return items[0]["price"].get("id")
-    except Exception:
-        pass
-    return None
-
+    return str(row[0]) if row and row[0] else None
 
 @router.post("/portal")
 def create_portal_session(request: Request, body: PortalRequest):
@@ -81,52 +64,62 @@ def create_portal_session(request: Request, body: PortalRequest):
         raise HTTPException(status_code=401, detail="No autenticado")
 
     target_plan = (body.target_plan or "").strip().lower()
-    if target_plan not in PLAN_TO_PRICE:
+    if target_plan not in PRICE_BY_PLAN:
         raise HTTPException(status_code=400, detail="target_plan inválido")
 
-    stripe_customer_id = _get_active_stripe_customer_id(user_id)
+    stripe_customer_id = _get_latest_stripe_customer_id(user_id)
     stripe_subscription_id = _get_active_stripe_subscription_id(user_id)
+
     if not stripe_customer_id or not stripe_subscription_id:
-        raise HTTPException(status_code=409, detail="No hay suscripción activa para mejorar")
+        raise HTTPException(status_code=409, detail="No hay una suscripción activa para mejorar")
 
-    target_price_id = PLAN_TO_PRICE[target_plan]
-    return_url = f"{FRONTEND_BASE_URL}/?billing=ok"
+    target_price_id = PRICE_BY_PLAN[target_plan]
 
-    # Lee la suscripción para obtener subscription_item_id y evitar “no changes”
+    # Lee la suscripción y detecta item_id + precio actual
     try:
-        sub = stripe.Subscription.retrieve(stripe_subscription_id, expand=["items.data.price"])
-    except Exception:
-        raise HTTPException(status_code=502, detail="No se pudo leer la suscripción en Stripe")
+        sub = stripe.Subscription.retrieve(
+            stripe_subscription_id,
+            expand=["items.data.price"],
+        )
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"No se pudo leer la suscripción: {type(e).__name__}")
 
     items = (sub.get("items") or {}).get("data") or []
-    if not items or not items[0].get("id"):
-        raise HTTPException(status_code=409, detail="Suscripción sin item")
+    if not items:
+        raise HTTPException(status_code=409, detail="Suscripción sin items")
 
-    subscription_item_id = items[0]["id"]
+    item0 = items[0]
+    subscription_item_id = item0.get("id")
+    current_price_id = (item0.get("price") or {}).get("id")
 
-    current_price_id = _get_current_price_id(sub)
+    if not subscription_item_id:
+        raise HTTPException(status_code=409, detail="Suscripción sin subscription_item_id")
+
+    # Evita el error: "no changes to confirm"
     if current_price_id == target_price_id:
-        # Stripe ya está en ese price
-        raise HTTPException(status_code=409, detail="Stripe ya tiene ese plan activo; no hay cambios por confirmar.")
+        raise HTTPException(status_code=409, detail="Ya estás en ese plan en Stripe (no hay cambios)")
+
+    return_url = f"{FRONTEND_BASE_URL}/?billing=ok"
 
     try:
         portal = stripe.billing_portal.Session.create(
             customer=stripe_customer_id,
             return_url=return_url,
             flow_data={
-                "type": "subscription_update",
-                "subscription_update": {
+                "type": "subscription_update_confirm",
+                "subscription_update_confirm": {
                     "subscription": stripe_subscription_id,
                     "items": [
-                        {"id": subscription_item_id, "price": target_price_id}
+                        {
+                            "id": subscription_item_id,
+                            "price": target_price_id,
+                            "quantity": 1,
+                        }
                     ],
                 },
             },
         )
-    except stripe_error.InvalidRequestError as e:
-        # Mensaje útil para debug
-        raise HTTPException(status_code=502, detail=f"Stripe portal error: {str(e)}")
-    except Exception:
-        raise HTTPException(status_code=502, detail="Stripe portal error")
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Stripe portal error: {type(e).__name__}")
 
     return {"url": portal.url}
