@@ -188,7 +188,7 @@ async def stripe_webhook(request: Request):
     print("STRIPE WEBHOOK:", etype)
 
     # 1) Checkout completado
-    if etype == "checkout.session.completed":
+    if etype in ("customer.subscription.created", "customer.subscription.updated"):
         session = event["data"]["object"]
 
         print("session.id:", session.get("id"))
@@ -294,6 +294,17 @@ async def stripe_webhook(request: Request):
 
         ps = _dt_from_unix(sub.get("current_period_start"))
         pe = _dt_from_unix(sub.get("current_period_end"))
+
+        # ✅ Fallback: periodos desde el invoice si la subscription no trae fechas aún
+        if (not ps or not pe):
+            try:
+                lines = (inv.get("lines") or {}).get("data") or []
+                if lines and lines[0].get("period"):
+                    ps = _dt_from_unix(lines[0]["period"].get("start"))
+                    pe = _dt_from_unix(lines[0]["period"].get("end"))
+            except Exception:
+                pass
+
         if not ps or not pe:
             return {"ok": True}
 
