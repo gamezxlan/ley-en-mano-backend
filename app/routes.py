@@ -198,9 +198,7 @@ def _effective_visitor_id(request: Request, body_visitor_id: str | None) -> str 
     return _get_cookie(request, VISITOR_COOKIE_NAME)
 
 def _effective_user_id(request: Request, body_user_id: str | None) -> str | None:
-    # prioridad: body -> cookie session
-    if body_user_id:
-        return body_user_id
+    # 🔒 Nunca confiar en user_id del body
     return _get_session_user_id(request)
 
 # ======================================================
