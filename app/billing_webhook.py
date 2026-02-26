@@ -243,6 +243,32 @@ def _upsert_subscription_from_stripe(
     _debug_db_read_sub(stripe_subscription_id)
     _debug_db_dump_user(user_id)
 
+
+def _update_plan_only_by_stripe_sub(
+    *,
+    stripe_subscription_id: str,
+    plan_code: str,
+    local_status: str | None,
+    stripe_price_id: str | None,
+    stripe_customer_id: str | None,
+):
+    with pool.connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE subscriptions
+                SET plan_code = %s,
+                    status = COALESCE(%s, status),
+                    stripe_price_id = COALESCE(%s, stripe_price_id),
+                    stripe_customer_id = COALESCE(%s, stripe_customer_id)
+                WHERE stripe_subscription_id = %s
+                """,
+                (plan_code, local_status, stripe_price_id, stripe_customer_id, stripe_subscription_id),
+            )
+            print("DB PLAN-ONLY UPDATE rowcount:", cur.rowcount, "sub:", stripe_subscription_id, "plan:", plan_code, "price:", stripe_price_id)
+        conn.commit()
+
+
 def _update_subscription_status_by_stripe_sub(stripe_subscription_id: str, new_status: str):
     with pool.connection() as conn:
         with conn.cursor() as cur:
@@ -299,8 +325,33 @@ def _upsert_from_subscription_event(sub: dict, checkout_session_id: str | None =
         "periods:", _safe(sub.get("current_period_start")), _safe(sub.get("current_period_end")),
     )
 
-    if not user_id or not stripe_subscription_id:
-        print("SUB EVENT skip: missing user_id/sub_id")
+    if not ps or not pe:
+        # ✅ Caso real tuyo: Stripe/Portal actualiza price pero tus eventos no traen periodos ni invoice.subscription
+        # Como la suscripción YA existe en DB (por la compra inicial), hacemos update parcial.
+        print("SUB EVENT: still missing periods -> doing PLAN-ONLY update (keeping DB periods)")
+        _update_plan_only_by_stripe_sub(
+            stripe_subscription_id=stripe_subscription_id,
+            plan_code=plan_code,
+            local_status=local_status,
+            stripe_price_id=price_id,
+            stripe_customer_id=stripe_customer_id,
+        )
+
+        # Debug: lee DB para confirmar
+        with pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT user_id, plan_code, status, stripe_subscription_id, stripe_price_id,
+                        current_period_start, current_period_end, created_at
+                    FROM subscriptions
+                    WHERE stripe_subscription_id = %s
+                    """,
+                    (stripe_subscription_id,),
+                )
+                row = cur.fetchone()
+                print("DB READ AFTER PLAN-ONLY:", row)
+
         return
 
     _ensure_user_exists(user_id)
