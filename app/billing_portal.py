@@ -5,7 +5,7 @@ from fastapi import APIRouter, Request, HTTPException
 from pydantic import BaseModel
 import os
 import stripe
-
+from stripe.error import InvalidRequestError
 from .db import pool
 from .routes import _get_session_user_id  # tu helper de cookie session
 
@@ -61,39 +61,33 @@ def _get_active_stripe_subscription_id(user_id: str) -> str | None:
 
 
 @router.post("/portal")
-def create_portal_session(request: Request, body: PortalRequest):
-    user_id = _get_session_user_id(request)
-    if not user_id:
-        raise HTTPException(status_code=401, detail="No autenticado")
-
-    target_plan = (body.target_plan or "").strip().lower()
-    if target_plan not in PLAN_TO_PRICE:
-        raise HTTPException(status_code=400, detail="target_plan inválido")
-
-    stripe_customer_id = _get_latest_stripe_customer_id(user_id)
-    stripe_subscription_id = _get_active_stripe_subscription_id(user_id)
-
-    if not stripe_customer_id or not stripe_subscription_id:
-        raise HTTPException(status_code=409, detail="No hay suscripción activa para mejorar")
-
-    target_price_id = PLAN_TO_PRICE[target_plan]
-
-    # 1) Traer subscription para obtener subscription_item_id
+def create_portal_session(request: Request, body: dict):
+    ...
+    # Traemos subscription + item id
     try:
         sub = stripe.Subscription.retrieve(
             stripe_subscription_id,
-            expand=["items.data"],
+            expand=["items.data.price"],
         )
     except Exception:
         raise HTTPException(status_code=502, detail="No se pudo leer la suscripción")
 
     items = (sub.get("items") or {}).get("data") or []
     if not items or not items[0].get("id"):
-        raise HTTPException(status_code=409, detail="Suscripción sin subscription_item")
+        raise HTTPException(status_code=409, detail="Suscripción sin item")
 
     subscription_item_id = items[0]["id"]
 
-    # 2) Crear Portal Session usando flow subscription_update_confirm (muestra prorrateo)
+    # ✅ Si el price actual ya es el target, no intentes update
+    current_price_id = None
+    try:
+        current_price_id = items[0]["price"]["id"]
+    except Exception:
+        pass
+
+    if current_price_id == target_price_id:
+        raise HTTPException(status_code=409, detail="Ya estás en ese plan.")
+
     return_url = f"{FRONTEND_BASE_URL}/?billing=ok"
 
     try:
@@ -101,28 +95,20 @@ def create_portal_session(request: Request, body: PortalRequest):
             customer=stripe_customer_id,
             return_url=return_url,
             flow_data={
-                "type": "subscription_update_confirm",
-                "after_completion": {
-                    "type": "redirect",
-                    "redirect": {
-                        "return_url": return_url
-                    }
-                },
-                "subscription_update_confirm": {
+                "type": "subscription_update",
+                "subscription_update": {
                     "subscription": stripe_subscription_id,
-                    "items": [
-                        {
-                            "id": subscription_item_id,
-                            "price": target_price_id,
-                            "quantity": 1,
-                        }
-                    ],
+                    "items": [{"id": subscription_item_id, "price": target_price_id}],
                 },
             },
         )
-    except Exception as e:
-        # útil para debug en Railway logs
-        print("STRIPE PORTAL ERROR:", type(e).__name__, str(e)[:400])
+    except InvalidRequestError as e:
+        msg = str(e.user_message or e)
+        # ✅ fallback por si stripe responde “no changes” por otras razones
+        if "no changes to confirm" in msg.lower():
+            raise HTTPException(status_code=409, detail="No hay cambios por aplicar (ya estás en ese plan).")
+        raise HTTPException(status_code=502, detail=f"Stripe portal error: {msg}")
+    except Exception:
         raise HTTPException(status_code=502, detail="Stripe portal error")
 
     return {"url": portal.url}
