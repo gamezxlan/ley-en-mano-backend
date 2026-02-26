@@ -167,6 +167,49 @@ def _update_periods_by_stripe_sub(stripe_subscription_id: str, period_start: dat
             )
         conn.commit()
 
+def _upsert_from_subscription_event(sub: dict, checkout_session_id: str | None = None):
+    stripe_subscription_id = sub.get("id")
+    stripe_customer_id = sub.get("customer")
+
+    md = sub.get("metadata") or {}
+    user_id = (md.get("user_id") or "").strip()
+    plan_code = (md.get("plan_code") or "").strip().lower()
+
+    if not user_id or not plan_code or not stripe_subscription_id:
+        # sin metadata no podemos asociar
+        return
+
+    _ensure_user_exists(user_id)
+
+    local_status = _map_stripe_status(sub.get("status"))
+
+    ps = _dt_from_unix(sub.get("current_period_start"))
+    pe = _dt_from_unix(sub.get("current_period_end"))
+    if not ps or not pe:
+        # si aún no hay periodos, no escribimos (lo rescata invoice.payment_succeeded)
+        return
+
+    # price_id
+    price_id = None
+    try:
+        items = (sub.get("items") or {}).get("data") or []
+        if items and items[0].get("price"):
+            price_id = items[0]["price"].get("id")
+    except Exception:
+        pass
+
+    _upsert_subscription_from_stripe(
+        user_id=user_id,
+        plan_code=plan_code,
+        local_status=local_status,
+        period_start=ps,
+        period_end=pe,
+        stripe_customer_id=stripe_customer_id,
+        stripe_subscription_id=stripe_subscription_id,
+        stripe_price_id=price_id,
+        stripe_checkout_session_id=checkout_session_id,
+    )
+
 
 @router.post("/webhook")
 async def stripe_webhook(request: Request):
@@ -189,71 +232,12 @@ async def stripe_webhook(request: Request):
 
     # 1) Checkout completado
     if etype in ("customer.subscription.created", "customer.subscription.updated"):
-        session = event["data"]["object"]
-
-        print("session.id:", session.get("id"))
-        print("session.subscription:", session.get("subscription"))
-        print("session.customer:", session.get("customer"))
-        print("metadata:", session.get("metadata"))
-
-        md = session.get("metadata") or {}
-        user_id = (md.get("user_id") or "").strip()
-        plan_code = (md.get("plan_code") or "").strip().lower()
-
-        if not user_id or not plan_code:
-            return {"ok": True}
-
-        _ensure_user_exists(user_id)
-
-        stripe_checkout_session_id = session.get("id")
-        stripe_customer_id = session.get("customer")
-        stripe_subscription_id = session.get("subscription")
-
-        if not stripe_subscription_id:
-            return {"ok": True}
-
-        # Traemos la sub para periodos + status real
-        try:
-            sub = stripe.Subscription.retrieve(stripe_subscription_id)
-        except Exception as e:
-            print("stripe.Subscription.retrieve failed:", str(e))
-            return {"ok": True}
-
-        print("sub.status:", sub.get("status"))
-        print("sub.current_period_start:", sub.get("current_period_start"))
-        print("sub.current_period_end:", sub.get("current_period_end"))
-
-        period_start = _dt_from_unix(sub.get("current_period_start"))
-        period_end = _dt_from_unix(sub.get("current_period_end"))
-
-        # Si Stripe aún no puso periodos, NO escribimos; lo arreglará subscription.updated
-        if not period_start or not period_end:
-            print("No period dates yet; skipping DB write (will rely on subscription.updated).")
-            return {"ok": True}
-
-        local_status = _map_stripe_status(sub.get("status"))
-
-        # price_id
-        price_id = None
-        try:
-            items = (sub.get("items") or {}).get("data") or []
-            if items and items[0].get("price"):
-                price_id = items[0]["price"].get("id")
-        except Exception:
-            pass
-
-        _upsert_subscription_from_stripe(
-            user_id=user_id,
-            plan_code=plan_code,
-            local_status=local_status,
-            period_start=period_start,
-            period_end=period_end,
-            stripe_customer_id=stripe_customer_id,
-            stripe_subscription_id=stripe_subscription_id,
-            stripe_price_id=price_id,
-            stripe_checkout_session_id=stripe_checkout_session_id,
-        )
-        return {"ok": True}
+    sub = event["data"]["object"]
+    _upsert_from_subscription_event(sub, checkout_session_id=None)
+    print("ETYPE:", etype)
+    obj = event["data"]["object"]
+    print("OBJ.ID:", obj.get("id"))
+    return {"ok": True}
 
     # 2) Cambios de suscripción (MUY recomendado para sincronía)
     if etype == "customer.subscription.updated":
@@ -295,7 +279,7 @@ async def stripe_webhook(request: Request):
         ps = _dt_from_unix(sub.get("current_period_start"))
         pe = _dt_from_unix(sub.get("current_period_end"))
 
-        # ✅ Fallback: periodos desde el invoice si la subscription no trae fechas aún
+        # ✅ Fallback: periodos del invoice
         if (not ps or not pe):
             try:
                 lines = (inv.get("lines") or {}).get("data") or []
