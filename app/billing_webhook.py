@@ -274,7 +274,6 @@ def _update_periods_by_stripe_sub(stripe_subscription_id: str, period_start: dat
         conn.commit()
     _debug_db_read_sub(stripe_subscription_id)
 
-
 def _upsert_from_subscription_event(sub: dict, checkout_session_id: str | None = None):
     stripe_subscription_id = sub.get("id")
     stripe_customer_id = sub.get("customer")
@@ -282,9 +281,11 @@ def _upsert_from_subscription_event(sub: dict, checkout_session_id: str | None =
     md = sub.get("metadata") or {}
     user_id = (md.get("user_id") or "").strip()
 
+    # Intentamos resolver plan desde el objeto recibido
     plan_code = _resolve_plan_code(sub)
     price_id = _get_price_id_from_sub(sub)
     local_status = _map_stripe_status(sub.get("status"))
+
     ps = _dt_from_unix(sub.get("current_period_start"))
     pe = _dt_from_unix(sub.get("current_period_end"))
 
@@ -298,14 +299,50 @@ def _upsert_from_subscription_event(sub: dict, checkout_session_id: str | None =
         "periods:", _safe(sub.get("current_period_start")), _safe(sub.get("current_period_end")),
     )
 
-    if not user_id or not plan_code or not stripe_subscription_id:
-        print("SUB EVENT skip: missing user_id/plan_code/sub_id")
+    if not user_id or not stripe_subscription_id:
+        print("SUB EVENT skip: missing user_id/sub_id")
         return
 
     _ensure_user_exists(user_id)
 
+    # ✅ Si faltan periodos (te está pasando en upgrades), recuperamos de Stripe
     if not ps or not pe:
-        print("SUB EVENT skip: missing periods (will rely on invoice events)")
+        print("SUB EVENT: missing periods -> retrieving from Stripe:", stripe_subscription_id)
+        try:
+            fresh = stripe.Subscription.retrieve(
+                stripe_subscription_id,
+                expand=["items.data.price"],
+            )
+        except Exception as e:
+            print("Subscription.retrieve failed:", type(e).__name__, _safe(e))
+            return
+
+        # reemplaza sub por el fresco
+        sub = fresh
+        stripe_customer_id = sub.get("customer") or stripe_customer_id
+        local_status = _map_stripe_status(sub.get("status"))
+
+        ps = _dt_from_unix(sub.get("current_period_start"))
+        pe = _dt_from_unix(sub.get("current_period_end"))
+
+        # re-resolver plan/price con el objeto fresco
+        price_id = _get_price_id_from_sub(sub)
+        plan_code = _resolve_plan_code(sub)
+
+        print(
+            "SUB EVENT refreshed:",
+            "status:", local_status,
+            "price_id:", price_id,
+            "resolved_plan:", plan_code,
+            "periods:", _safe(sub.get("current_period_start")), _safe(sub.get("current_period_end")),
+        )
+
+    if not plan_code:
+        print("SUB EVENT skip: cannot resolve plan_code even after refresh")
+        return
+
+    if not ps or not pe:
+        print("SUB EVENT skip: still missing periods after refresh")
         return
 
     _upsert_subscription_from_stripe(
@@ -319,7 +356,6 @@ def _upsert_from_subscription_event(sub: dict, checkout_session_id: str | None =
         stripe_price_id=price_id,
         stripe_checkout_session_id=checkout_session_id,
     )
-
 
 def _periods_from_invoice_object(inv: dict) -> tuple[datetime | None, datetime | None]:
     try:
