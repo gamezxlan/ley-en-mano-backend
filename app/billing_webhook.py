@@ -230,31 +230,21 @@ async def stripe_webhook(request: Request):
     etype = event.get("type")
     print("STRIPE WEBHOOK:", etype)
 
-    # 1) Checkout completado
-    if etype in ("customer.subscription.created", "customer.subscription.updated"):
-    sub = event["data"]["object"]
-    _upsert_from_subscription_event(sub, checkout_session_id=None)
-    print("ETYPE:", etype)
     obj = event["data"]["object"]
     print("OBJ.ID:", obj.get("id"))
-    return {"ok": True}
 
-    # 2) Cambios de suscripción (MUY recomendado para sincronía)
-    if etype == "customer.subscription.updated":
-        sub = event["data"]["object"]
-        stripe_subscription_id = sub.get("id")
-        if stripe_subscription_id:
-            local_status = _map_stripe_status(sub.get("status"))
-            _update_subscription_status_by_stripe_sub(stripe_subscription_id, local_status)
-
-            ps = _dt_from_unix(sub.get("current_period_start"))
-            pe = _dt_from_unix(sub.get("current_period_end"))
-            if ps and pe:
-                _update_periods_by_stripe_sub(stripe_subscription_id, ps, pe)
+    # 1) Suscripción creada/actualizada: UPSERT (crea o actualiza)
+    if etype in ("customer.subscription.created", "customer.subscription.updated"):
+        sub = obj
+        try:
+            _upsert_from_subscription_event(sub, checkout_session_id=None)
+        except Exception as e:
+            print("upsert_from_subscription_event failed:", type(e).__name__, str(e)[:200])
         return {"ok": True}
 
+    # 2) Pagos / invoice: asegura periodos (fallback desde invoice.lines)
     if etype in ("invoice.paid", "invoice.payment_succeeded"):
-        inv = event["data"]["object"]
+        inv = obj
         stripe_subscription_id = inv.get("subscription")
         stripe_customer_id = inv.get("customer")
 
@@ -313,11 +303,14 @@ async def stripe_webhook(request: Request):
             stripe_price_id=price_id,
             stripe_checkout_session_id=None,
         )
+        print("inv.lines:", (inv.get("lines") or {}).get("data")[:1])
+        print("sub.current_period_start:", sub.get("current_period_start"))
+        print("sub.current_period_end:", sub.get("current_period_end"))
         return {"ok": True}
 
     # 3) Pago fallido
     if etype == "invoice.payment_failed":
-        inv = event["data"]["object"]
+        inv = obj
         stripe_subscription_id = inv.get("subscription")
         if stripe_subscription_id:
             _update_subscription_status_by_stripe_sub(stripe_subscription_id, "past_due")
@@ -325,10 +318,11 @@ async def stripe_webhook(request: Request):
 
     # 4) Suscripción eliminada
     if etype == "customer.subscription.deleted":
-        sub = event["data"]["object"]
+        sub = obj
         stripe_subscription_id = sub.get("id")
         if stripe_subscription_id:
             _update_subscription_status_by_stripe_sub(stripe_subscription_id, "canceled")
         return {"ok": True}
 
+    # 5) checkout.session.completed lo puedes manejar o ignorar (ya no es necesario para DB)
     return {"ok": True}
