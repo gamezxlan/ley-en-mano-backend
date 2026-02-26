@@ -29,13 +29,13 @@ def _get_active_stripe_customer_id(user_id: str) -> str | None:
                 FROM subscriptions
                 WHERE user_id = %s
                   AND stripe_customer_id IS NOT NULL
-                ORDER BY current_period_end DESC NULLS LAST, created_at DESC
+                ORDER BY current_period_end DESC, created_at DESC
                 LIMIT 1
                 """,
                 (user_id,),
             )
             row = cur.fetchone()
-            return str(row[0]) if row and row[0] else None
+            return row[0] if row else None
 
 def _get_active_stripe_subscription_id(user_id: str) -> str | None:
     with pool.connection() as conn:
@@ -47,13 +47,13 @@ def _get_active_stripe_subscription_id(user_id: str) -> str | None:
                 WHERE user_id = %s
                   AND status = 'active'
                   AND stripe_subscription_id IS NOT NULL
-                ORDER BY current_period_end DESC NULLS LAST, created_at DESC
+                ORDER BY current_period_end DESC, created_at DESC
                 LIMIT 1
                 """,
                 (user_id,),
             )
             row = cur.fetchone()
-            return str(row[0]) if row and row[0] else None
+            return row[0] if row else None
 
 @router.post("/portal")
 def create_portal_session(request: Request, body: dict):
