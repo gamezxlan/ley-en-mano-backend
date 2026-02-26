@@ -22,6 +22,64 @@ PRICE_TO_PLAN = {
 PRICE_TO_PLAN = {k: v for k, v in PRICE_TO_PLAN.items() if k}
 
 
+# -----------------------
+# Debug helpers
+# -----------------------
+def _safe(v, maxlen: int = 180):
+    try:
+        s = str(v)
+    except Exception:
+        return "<unprintable>"
+    if len(s) > maxlen:
+        return s[:maxlen] + "..."
+    return s
+
+def _debug_db_dump_user(user_id: str):
+    """Imprime el top 5 de subs del usuario para detectar 'fila equivocada'."""
+    try:
+        with pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT plan_code, status, stripe_subscription_id, stripe_price_id,
+                           current_period_end, created_at
+                    FROM subscriptions
+                    WHERE user_id = %s
+                    ORDER BY created_at DESC
+                    LIMIT 5
+                    """,
+                    (user_id,),
+                )
+                rows = cur.fetchall() or []
+        print("DB TOP5 subs for user:", user_id)
+        for r in rows:
+            print("  -", r)
+    except Exception as e:
+        print("DB DUMP USER failed:", type(e).__name__, _safe(e))
+
+def _debug_db_read_sub(stripe_subscription_id: str):
+    """Lee y muestra lo que quedó en DB para ese stripe_subscription_id."""
+    try:
+        with pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT user_id, plan_code, status, stripe_subscription_id, stripe_price_id,
+                           current_period_start, current_period_end, created_at
+                    FROM subscriptions
+                    WHERE stripe_subscription_id = %s
+                    """,
+                    (stripe_subscription_id,),
+                )
+                row = cur.fetchone()
+        print("DB READ sub:", stripe_subscription_id, "=>", row)
+    except Exception as e:
+        print("DB READ sub failed:", type(e).__name__, _safe(e))
+
+
+# -----------------------
+# Stripe mapping
+# -----------------------
 def _dt_from_unix(ts: int | None) -> datetime | None:
     if ts is None:
         return None
@@ -29,7 +87,6 @@ def _dt_from_unix(ts: int | None) -> datetime | None:
         return datetime.fromtimestamp(int(ts), tz=timezone.utc)
     except Exception:
         return None
-
 
 def _get_price_id_from_sub(sub: dict) -> str | None:
     try:
@@ -39,7 +96,6 @@ def _get_price_id_from_sub(sub: dict) -> str | None:
     except Exception:
         pass
     return None
-
 
 def _resolve_plan_code(sub: dict) -> str | None:
     """
@@ -58,7 +114,6 @@ def _resolve_plan_code(sub: dict) -> str | None:
 
     return None
 
-
 def _ensure_user_exists(user_id: str):
     with pool.connection() as conn:
         with conn.cursor() as cur:
@@ -71,7 +126,6 @@ def _ensure_user_exists(user_id: str):
                 (user_id,),
             )
         conn.commit()
-
 
 def _map_stripe_status(s: str | None) -> str:
     st = (s or "").lower().strip()
@@ -90,6 +144,9 @@ def _map_stripe_status(s: str | None) -> str:
     return st
 
 
+# -----------------------
+# DB writers
+# -----------------------
 def _deactivate_other_active_subs(user_id: str, keep_stripe_sub_id: str | None):
     # para respetar tu índice ux_one_active_sub_per_user
     with pool.connection() as conn:
@@ -105,6 +162,7 @@ def _deactivate_other_active_subs(user_id: str, keep_stripe_sub_id: str | None):
                     """,
                     (user_id, keep_stripe_sub_id),
                 )
+                print("DB deactivate rowcount:", cur.rowcount, "user:", user_id, "keep:", keep_stripe_sub_id)
             else:
                 cur.execute(
                     """
@@ -115,8 +173,8 @@ def _deactivate_other_active_subs(user_id: str, keep_stripe_sub_id: str | None):
                     """,
                     (user_id,),
                 )
+                print("DB deactivate rowcount:", cur.rowcount, "user:", user_id, "keep: None")
         conn.commit()
-
 
 def _upsert_subscription_from_stripe(
     *,
@@ -171,8 +229,19 @@ def _upsert_subscription_from_stripe(
                     stripe_checkout_session_id,
                 ),
             )
+            print(
+                "DB UPSERT exec ok:",
+                "sub:", stripe_subscription_id,
+                "user:", user_id,
+                "plan:", plan_code,
+                "status:", local_status,
+                "price:", stripe_price_id,
+            )
         conn.commit()
 
+    # ✅ Confirmación inmediata de lo guardado
+    _debug_db_read_sub(stripe_subscription_id)
+    _debug_db_dump_user(user_id)
 
 def _update_subscription_status_by_stripe_sub(stripe_subscription_id: str, new_status: str):
     with pool.connection() as conn:
@@ -185,8 +254,9 @@ def _update_subscription_status_by_stripe_sub(stripe_subscription_id: str, new_s
                 """,
                 (new_status, stripe_subscription_id),
             )
+            print("DB UPDATE status rowcount:", cur.rowcount, "sub:", stripe_subscription_id, "=>", new_status)
         conn.commit()
-
+    _debug_db_read_sub(stripe_subscription_id)
 
 def _update_periods_by_stripe_sub(stripe_subscription_id: str, period_start: datetime, period_end: datetime):
     with pool.connection() as conn:
@@ -200,7 +270,9 @@ def _update_periods_by_stripe_sub(stripe_subscription_id: str, period_start: dat
                 """,
                 (period_start, period_end, stripe_subscription_id),
             )
+            print("DB UPDATE periods rowcount:", cur.rowcount, "sub:", stripe_subscription_id)
         conn.commit()
+    _debug_db_read_sub(stripe_subscription_id)
 
 
 def _upsert_from_subscription_event(sub: dict, checkout_session_id: str | None = None):
@@ -211,20 +283,30 @@ def _upsert_from_subscription_event(sub: dict, checkout_session_id: str | None =
     user_id = (md.get("user_id") or "").strip()
 
     plan_code = _resolve_plan_code(sub)
+    price_id = _get_price_id_from_sub(sub)
+    local_status = _map_stripe_status(sub.get("status"))
+    ps = _dt_from_unix(sub.get("current_period_start"))
+    pe = _dt_from_unix(sub.get("current_period_end"))
+
+    print(
+        "SUB EVENT parsed:",
+        "sub:", stripe_subscription_id,
+        "user:", user_id,
+        "status:", local_status,
+        "price_id:", price_id,
+        "resolved_plan:", plan_code,
+        "periods:", _safe(sub.get("current_period_start")), _safe(sub.get("current_period_end")),
+    )
+
     if not user_id or not plan_code or not stripe_subscription_id:
+        print("SUB EVENT skip: missing user_id/plan_code/sub_id")
         return
 
     _ensure_user_exists(user_id)
 
-    local_status = _map_stripe_status(sub.get("status"))
-
-    ps = _dt_from_unix(sub.get("current_period_start"))
-    pe = _dt_from_unix(sub.get("current_period_end"))
     if not ps or not pe:
-        # lo rescata invoice.payment_succeeded
+        print("SUB EVENT skip: missing periods (will rely on invoice events)")
         return
-
-    price_id = _get_price_id_from_sub(sub)
 
     _upsert_subscription_from_stripe(
         user_id=user_id,
@@ -251,6 +333,9 @@ def _periods_from_invoice_object(inv: dict) -> tuple[datetime | None, datetime |
     return None, None
 
 
+# -----------------------
+# Webhook
+# -----------------------
 @router.post("/webhook")
 async def stripe_webhook(request: Request):
     payload = await request.body()
@@ -268,20 +353,24 @@ async def stripe_webhook(request: Request):
         raise HTTPException(status_code=400, detail="Invalid webhook signature")
 
     etype = event.get("type")
-    print("STRIPE WEBHOOK:", etype)
-
     obj = event["data"]["object"]
-    print("OBJ.ID:", obj.get("id"))
+
+    print("STRIPE WEBHOOK:", etype)
+    print("OBJ.ID:", _safe(obj.get("id")))
 
     # 1) Suscripción creada/actualizada: UPSERT (crea o actualiza)
     if etype in ("customer.subscription.created", "customer.subscription.updated"):
         sub = obj
         try:
-            # debug útil para verificar upgrade por price
-            print("SUB price_id:", _get_price_id_from_sub(sub), "resolved_plan:", _resolve_plan_code(sub))
+            print("SUB raw:", "id=", _safe(sub.get("id")), "customer=", _safe(sub.get("customer")), "status=", _safe(sub.get("status")))
+            print("SUB md:", _safe(sub.get("metadata")))
+            print("SUB price_id:", _safe(_get_price_id_from_sub(sub)), "resolved_plan:", _safe(_resolve_plan_code(sub)))
+
             _upsert_from_subscription_event(sub, checkout_session_id=None)
+
+            print("SUB EVENT handled OK:", _safe(sub.get("id")))
         except Exception as e:
-            print("upsert_from_subscription_event failed:", type(e).__name__, str(e)[:200])
+            print("SUB EVENT failed:", type(e).__name__, _safe(e))
         return {"ok": True}
 
     # 2) Checkout completado (opcional): asegura stripe_checkout_session_id en DB
@@ -291,9 +380,11 @@ async def stripe_webhook(request: Request):
         user_id = (md.get("user_id") or "").strip()
 
         print("checkout.md:", md)
-        print("checkout.subscription:", session.get("subscription"))
+        print("checkout.subscription:", _safe(session.get("subscription")))
+        print("checkout.customer:", _safe(session.get("customer")))
 
         if not user_id:
+            print("checkout.session.completed skip: missing user_id")
             return {"ok": True}
 
         _ensure_user_exists(user_id)
@@ -303,6 +394,7 @@ async def stripe_webhook(request: Request):
         stripe_subscription_id = session.get("subscription")
 
         if not stripe_subscription_id:
+            print("checkout.session.completed skip: missing subscription")
             return {"ok": True}
 
         try:
@@ -311,13 +403,12 @@ async def stripe_webhook(request: Request):
                 expand=["latest_invoice.lines.data", "items.data.price"],
             )
         except Exception as e:
-            print("Subscription.retrieve failed:", type(e).__name__, str(e)[:200])
+            print("Subscription.retrieve failed:", type(e).__name__, _safe(e))
             return {"ok": True}
 
         ps = _dt_from_unix(sub.get("current_period_start"))
         pe = _dt_from_unix(sub.get("current_period_end"))
 
-        # fallback: periodos desde latest_invoice
         if (not ps or not pe):
             latest_inv = sub.get("latest_invoice")
             if isinstance(latest_inv, dict):
@@ -326,10 +417,12 @@ async def stripe_webhook(request: Request):
                 pe = pe or pe2
 
         if not ps or not pe:
+            print("checkout.session.completed skip: missing periods even after fallback")
             return {"ok": True}
 
-        plan_code = _resolve_plan_code(sub)  # ✅ por price primero
+        plan_code = _resolve_plan_code(sub)
         if not plan_code:
+            print("checkout.session.completed skip: cannot resolve plan_code")
             return {"ok": True}
 
         local_status = _map_stripe_status(sub.get("status"))
@@ -346,16 +439,19 @@ async def stripe_webhook(request: Request):
             stripe_price_id=price_id,
             stripe_checkout_session_id=stripe_checkout_session_id,
         )
-        print("DB UPSERT OK for:", stripe_subscription_id)
+        print("checkout.session.completed DB UPSERT OK for:", stripe_subscription_id)
         return {"ok": True}
 
-    # 3) Pagos / invoice: asegura periodos y también plan_code por price
+    # 3) Pagos / invoice: asegura periodos y plan_code por price
     if etype in ("invoice.paid", "invoice.payment_succeeded"):
         inv = obj
         stripe_subscription_id = inv.get("subscription")
         stripe_customer_id = inv.get("customer")
 
+        print("INV:", "id=", _safe(inv.get("id")), "sub=", _safe(stripe_subscription_id), "customer=", _safe(stripe_customer_id))
+
         if not stripe_subscription_id:
+            print("invoice skip: missing subscription")
             return {"ok": True}
 
         try:
@@ -364,16 +460,18 @@ async def stripe_webhook(request: Request):
                 expand=["items.data.price"],
             )
         except Exception as e:
-            print("Subscription.retrieve failed:", str(e))
+            print("Subscription.retrieve failed:", type(e).__name__, _safe(e))
             return {"ok": True}
 
         md = sub.get("metadata") or {}
         user_id = (md.get("user_id") or "").strip()
         if not user_id:
+            print("invoice skip: missing user_id in subscription metadata")
             return {"ok": True}
 
-        plan_code = _resolve_plan_code(sub)  # ✅ por price primero
+        plan_code = _resolve_plan_code(sub)
         if not plan_code:
+            print("invoice skip: cannot resolve plan_code")
             return {"ok": True}
 
         _ensure_user_exists(user_id)
@@ -381,13 +479,13 @@ async def stripe_webhook(request: Request):
         ps = _dt_from_unix(sub.get("current_period_start"))
         pe = _dt_from_unix(sub.get("current_period_end"))
 
-        # fallback: periodos del invoice
         if (not ps or not pe):
             ps2, pe2 = _periods_from_invoice_object(inv)
             ps = ps or ps2
             pe = pe or pe2
 
         if not ps or not pe:
+            print("invoice skip: missing periods even after fallback")
             return {"ok": True}
 
         local_status = _map_stripe_status(sub.get("status"))
@@ -404,12 +502,14 @@ async def stripe_webhook(request: Request):
             stripe_price_id=price_id,
             stripe_checkout_session_id=None,
         )
+        print("invoice DB UPSERT OK for:", stripe_subscription_id)
         return {"ok": True}
 
     # 4) Pago fallido
     if etype == "invoice.payment_failed":
         inv = obj
         stripe_subscription_id = inv.get("subscription")
+        print("invoice.payment_failed sub:", _safe(stripe_subscription_id))
         if stripe_subscription_id:
             _update_subscription_status_by_stripe_sub(stripe_subscription_id, "past_due")
         return {"ok": True}
@@ -418,6 +518,7 @@ async def stripe_webhook(request: Request):
     if etype == "customer.subscription.deleted":
         sub = obj
         stripe_subscription_id = sub.get("id")
+        print("customer.subscription.deleted sub:", _safe(stripe_subscription_id))
         if stripe_subscription_id:
             _update_subscription_status_by_stripe_sub(stripe_subscription_id, "canceled")
         return {"ok": True}
