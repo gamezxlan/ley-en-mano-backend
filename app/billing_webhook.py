@@ -269,6 +269,57 @@ async def stripe_webhook(request: Request):
                 _update_periods_by_stripe_sub(stripe_subscription_id, ps, pe)
         return {"ok": True}
 
+    if etype in ("invoice.paid", "invoice.payment_succeeded"):
+        inv = event["data"]["object"]
+        stripe_subscription_id = inv.get("subscription")
+        stripe_customer_id = inv.get("customer")
+
+        if not stripe_subscription_id:
+            return {"ok": True}
+
+        try:
+            sub = stripe.Subscription.retrieve(stripe_subscription_id)
+        except Exception as e:
+            print("Subscription.retrieve failed:", str(e))
+            return {"ok": True}
+
+        md = sub.get("metadata") or {}
+        user_id = (md.get("user_id") or "").strip()
+        plan_code = (md.get("plan_code") or "").strip().lower()
+
+        if not user_id or not plan_code:
+            return {"ok": True}
+
+        _ensure_user_exists(user_id)
+
+        ps = _dt_from_unix(sub.get("current_period_start"))
+        pe = _dt_from_unix(sub.get("current_period_end"))
+        if not ps or not pe:
+            return {"ok": True}
+
+        local_status = _map_stripe_status(sub.get("status"))
+
+        price_id = None
+        try:
+            items = (sub.get("items") or {}).get("data") or []
+            if items and items[0].get("price"):
+                price_id = items[0]["price"].get("id")
+        except Exception:
+            pass
+
+        _upsert_subscription_from_stripe(
+            user_id=user_id,
+            plan_code=plan_code,
+            local_status=local_status,
+            period_start=ps,
+            period_end=pe,
+            stripe_customer_id=stripe_customer_id,
+            stripe_subscription_id=stripe_subscription_id,
+            stripe_price_id=price_id,
+            stripe_checkout_session_id=None,
+        )
+        return {"ok": True}
+
     # 3) Pago fallido
     if etype == "invoice.payment_failed":
         inv = event["data"]["object"]
