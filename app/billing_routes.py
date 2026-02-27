@@ -108,22 +108,24 @@ def _save_user_stripe_customer_id(user_id: str, stripe_customer_id: str):
         conn.commit()  # ✅ IMPORTANTE
 
 def _get_or_create_stripe_customer(*, user_id: str, email: str | None) -> str:
-    """
-    ✅ AUTOCURABLE:
-    - Si users.stripe_customer_id existe, valida que exista en Stripe (modo actual test/live).
-    - Si Stripe responde "No such customer" (o fue borrado), crea uno nuevo y actualiza DB.
-    """
     existing = _get_user_stripe_customer_id(user_id)
 
     if existing:
+        existing = str(existing).strip().strip("'").strip('"')  # por si guardaste con comillas
         try:
             stripe.Customer.retrieve(existing)
             return existing
-        except stripe.error.InvalidRequestError as e:
-            # Ej: No such customer (típico por test<->live o borrado)
-            print("Stripe customer invalid, recreating:", existing, "err:", str(e)[:220])
         except Exception as e:
-            print("Stripe customer retrieve failed, recreating:", existing, type(e).__name__, str(e)[:220])
+            msg = str(e) or ""
+            print("Stripe customer retrieve error:", type(e).__name__, msg[:240])
+
+            # ✅ Autocura si no existe (test/live cruzado o borrado)
+            if "No such customer" not in msg and "no such customer" not in msg.lower():
+                # Si quieres, puedes autocurar SIEMPRE ante cualquier error,
+                # pero aquí lo dejamos específico
+                pass
+            else:
+                print("Stripe customer invalid -> recreating:", existing)
 
     # Crear customer nuevo
     try:
