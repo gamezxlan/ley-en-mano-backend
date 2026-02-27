@@ -104,22 +104,22 @@ def build_policy(visitor_id: str, user_id: str | None, ip_hash: str | None) -> P
             subscription_end_iso=None,
         )
 
-    # Guest
-    used = count_day_usage_by_ip(ip_hash) if ip_hash else count_day_usage(visitor_id, None)
-    limit = 1
-    remaining = max(0, limit - used)
-    return Policy(
-        profile="guest",
-        tier="guest",
-        model_kind="lite",
-        response_mode="blindaje_only",
-        cards_per_step="1",
-        daily_limit=limit,
-        monthly_limit=None,
-        remaining=remaining,
-        reset_at_iso=_reset_at_daily_iso(),
-        plan_code=None,
-        subscription_status=None,
-        subscription_start_iso=None,
-        subscription_end_iso=None,
-    )
+        # Guest
+        used = count_day_usage_by_ip(ip_hash) if ip_hash else count_day_usage(visitor_id, None)
+        limit = 1
+        remaining = max(0, limit - used)
+        return Policy(
+            profile="guest",
+            tier="guest",
+            model_kind="lite",
+            response_mode="blindaje_only",
+            cards_per_step="1",
+            daily_limit=limit,
+            monthly_limit=None,
+            remaining=remaining,
+            reset_at_iso=_reset_at_daily_iso(),
+            plan_code=None,
+            subscription_status=None,
+            subscription_start_iso=None,
+            subscription_end_iso=None,
+        )
