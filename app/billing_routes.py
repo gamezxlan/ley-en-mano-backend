@@ -108,28 +108,33 @@ def _save_user_stripe_customer_id(user_id: str, stripe_customer_id: str):
         conn.commit()
 
 def _get_or_create_stripe_customer(*, user_id: str, email: str | None) -> str:
-    """
-    Reutiliza un customer existente (users.stripe_customer_id).
-    Si no existe, crea uno nuevo y lo guarda.
-    """
     existing = _get_user_stripe_customer_id(user_id)
     if existing:
-        return existing
+        # ✅ Validar que exista en el "mode" actual (test/live)
+        try:
+            stripe.Customer.retrieve(existing)
+            return existing
+        except stripe.error.InvalidRequestError as e:
+            # Ej: "No such customer" (muy típico cuando cambiaste de test <-> live)
+            print("Stripe customer invalid, recreating:", existing, "err:", str(e)[:200])
+        except Exception as e:
+            # Cualquier otra cosa rara: también recreamos
+            print("Stripe customer retrieve failed, recreating:", existing, type(e).__name__, str(e)[:200])
 
-    # Crear customer en Stripe (idempotencia: metadata user_id)
+    # Crear nuevo customer
     try:
         customer = stripe.Customer.create(
             email=email if email else None,
             metadata={"user_id": user_id, "app": "leyenmano"},
         )
     except Exception as e:
-        raise HTTPException(status_code=502, detail=f"Stripe customer error: {type(e).__name__}")
+        raise HTTPException(status_code=502, detail=f"Stripe customer error: {type(e).__name__}: {str(e)[:220]}")
 
     cid = customer.get("id")
     if not cid:
         raise HTTPException(status_code=502, detail="Stripe customer creation failed (no id)")
 
-    _save_user_stripe_customer_id(user_id, cid)
+    _save_user_stripe_customer_id(user_id, str(cid))
     return str(cid)
 
 # -----------------------
