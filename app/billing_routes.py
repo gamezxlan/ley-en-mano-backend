@@ -7,7 +7,6 @@ import os
 import hashlib
 
 import stripe
-
 from .db import pool
 
 router = APIRouter(prefix="/billing", tags=["billing"])
@@ -19,7 +18,7 @@ stripe.api_key = os.environ["STRIPE_SECRET_KEY"]
 
 FRONTEND_BASE_URL = os.getenv("FRONTEND_BASE_URL", "http://localhost:5173")
 
-# Cookies/sessions (mismo esquema que ya usas)
+# Cookies/sessions
 ENV = os.getenv("ENV", "development")
 COOKIE_DOMAIN = os.getenv("COOKIE_DOMAIN", ".leyenmano.com" if ENV == "production" else None)
 SESSION_COOKIE_NAME = os.getenv("SESSION_COOKIE_NAME", "session_id")
@@ -81,13 +80,63 @@ def _get_user_email(user_id: str) -> str | None:
         return None
     return str(row[0]) if row[0] else None
 
+def _get_user_stripe_customer_id(user_id: str) -> str | None:
+    with pool.connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT stripe_customer_id
+                FROM users
+                WHERE user_id = %s
+                """,
+                (user_id,),
+            )
+            row = cur.fetchone()
+    return str(row[0]) if row and row[0] else None
+
+def _save_user_stripe_customer_id(user_id: str, stripe_customer_id: str):
+    with pool.connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE users
+                SET stripe_customer_id = %s
+                WHERE user_id = %s
+                """,
+                (stripe_customer_id, user_id),
+            )
+        conn.commit()
+
+def _get_or_create_stripe_customer(*, user_id: str, email: str | None) -> str:
+    """
+    Reutiliza un customer existente (users.stripe_customer_id).
+    Si no existe, crea uno nuevo y lo guarda.
+    """
+    existing = _get_user_stripe_customer_id(user_id)
+    if existing:
+        return existing
+
+    # Crear customer en Stripe (idempotencia: metadata user_id)
+    try:
+        customer = stripe.Customer.create(
+            email=email if email else None,
+            metadata={"user_id": user_id, "app": "leyenmano"},
+        )
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Stripe customer error: {type(e).__name__}")
+
+    cid = customer.get("id")
+    if not cid:
+        raise HTTPException(status_code=502, detail="Stripe customer creation failed (no id)")
+
+    _save_user_stripe_customer_id(user_id, cid)
+    return str(cid)
 
 # -----------------------
 # API
 # -----------------------
 class CheckoutRequest(BaseModel):
     plan_code: str  # "p99" | "p199"
-
 
 @router.post("/checkout")
 def create_checkout_session(request: Request, body: CheckoutRequest):
@@ -103,8 +152,9 @@ def create_checkout_session(request: Request, body: CheckoutRequest):
     price_id = PLAN_TO_PRICE[plan_code]
     email = _get_user_email(user_id)
 
-    # URLs
-    # (puedes cambiar query params a lo que quieras en el frontend)
+    # ✅ Customer real (evita que Stripe cree "Invitado")
+    stripe_customer_id = _get_or_create_stripe_customer(user_id=user_id, email=email)
+
     success_url = f"{FRONTEND_BASE_URL}/?billing=ok"
     cancel_url = f"{FRONTEND_BASE_URL}/?billing=cancel"
 
@@ -114,11 +164,17 @@ def create_checkout_session(request: Request, body: CheckoutRequest):
             line_items=[{"price": price_id, "quantity": 1}],
             success_url=success_url,
             cancel_url=cancel_url,
-            customer_email=email if email else None,
-            client_reference_id=user_id,
 
-            # si NO quieres cupones/códigos:
-            # allow_promotion_codes=False,
+            # ✅ Vincula el pago a un Customer real
+            customer=stripe_customer_id,
+
+            # (opcional) fuerza que Checkout use el customer y no haga cosas raras
+            customer_update={
+                "address": "auto",
+                "name": "auto",
+            },
+
+            client_reference_id=user_id,
 
             # ✅ metadata en session (para webhook)
             metadata={
