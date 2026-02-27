@@ -88,7 +88,7 @@ def build_policy(visitor_id: str, user_id: str | None, ip_hash: str | None) -> P
         # ------------------------------------------------------
         # Registrado sin plan => FREE
         # ------------------------------------------------------
-        used = count_day_usage_by_ip(ip_hash) if ip_hash else count_day_usage(visitor_id, user_id)
+        used = count_day_usage(visitor_id, user_id)  # ✅ por usuario
         limit = 2
         remaining = max(0, limit - used)
         return Policy(

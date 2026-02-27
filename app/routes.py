@@ -4,7 +4,7 @@ from google import genai
 from google.genai import types
 from .cache import get_cache, MODEL_FLASH, MODEL_LITE
 from .ratelimit import limiter
-from .blocklist import check_ip_visitor
+from .blocklist import check_identity
 from .ip_utils import get_client_ip, hash_ip
 from .usage_repo import (
     upsert_visitor,
@@ -618,8 +618,39 @@ def policy(request: Request, response: Response, data: PolicyRequest):
         email = _get_user_email(user_id)
 
     upsert_visitor(visitor_id, user_id)
+
     ip = get_client_ip(request)
     ip_hash = hash_ip(ip)
+
+    # ------------------------------------------------------
+    # ✅ Blocklist "suave" también para /policy (tu config ENDPOINT_LIMITS["/policy"])
+    # ------------------------------------------------------
+    allowed, wait, breason = check_identity(ip=ip, visitor_id=visitor_id, endpoint="/policy")
+    if not allowed:
+        insert_usage_event(
+            visitor_id=visitor_id,
+            user_id=user_id,
+            profile="unknown",
+            plan_code=None,
+            model_used="n/a",
+            endpoint="/policy",
+            allowed=False,
+            reason=f"{breason}:{wait}s",
+            ip_hash=ip_hash,
+            entitlement_id=None,
+        )
+        raise HTTPException(
+            status_code=429,
+            detail={
+                "error": "RATE_LIMITED",
+                "reason": breason,
+                "wait_seconds": int(wait),
+            },
+        )
+
+    # ------------------------------------------------------
+    # Policy normal
+    # ------------------------------------------------------
     pol = build_policy(visitor_id, user_id, ip_hash)
 
     latest_ent = get_latest_entitlement_any_status(user_id) if user_id else None
@@ -638,9 +669,9 @@ def policy(request: Request, response: Response, data: PolicyRequest):
     return {
         "visitor_id": visitor_id,
         "user_id": user_id,
-        "email": email,  # ✅
+        "email": email,
         "profile": pol.profile,
-        "tier": pol.tier,  # ✅ NUEVO
+        "tier": pol.tier,
         "plan_code": pol.plan_code,
         "limits": {"daily": pol.daily_limit, "monthly": pol.monthly_limit},
         "remaining": pol.remaining,
@@ -671,7 +702,7 @@ def consultar(request: Request, response: Response, data: Consulta):
         ensure_user(user_id)
 
 
-    allowed, wait = check_ip_visitor(ip, visitor_id)
+    allowed, wait, breason = check_identity(ip=ip, visitor_id=visitor_id, endpoint="/consultar")
     if not allowed:
         insert_usage_event(
             visitor_id=visitor_id,
@@ -681,10 +712,18 @@ def consultar(request: Request, response: Response, data: Consulta):
             model_used="n/a",
             endpoint="/consultar",
             allowed=False,
-            reason=f"blocked_short:{wait}s",
+            reason=f"{breason}:{wait}s",
             ip_hash=ip_hash,
+            entitlement_id=None,
         )
-        raise HTTPException(status_code=429, detail=f"Bloqueado temporalmente. Intenta de nuevo en {wait}s.")
+        raise HTTPException(
+            status_code=429,
+            detail={
+                "error": "RATE_LIMITED",
+                "reason": breason,
+                "wait_seconds": wait,
+            },
+        )
 
     if not data.pregunta or len(data.pregunta.strip()) < 3:
         raise HTTPException(status_code=400, detail="pregunta inválida")
