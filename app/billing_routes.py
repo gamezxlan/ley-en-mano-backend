@@ -185,6 +185,7 @@ def create_checkout_session(request: Request, body: CheckoutRequest):
             },
         )
     except Exception as e:
+        print("Stripe checkout error:", type(e).__name__, str(e))
         raise HTTPException(status_code=502, detail=f"Stripe error: {type(e).__name__}")
 
     return {"url": session.url}
