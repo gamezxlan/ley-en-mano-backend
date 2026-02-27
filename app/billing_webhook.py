@@ -61,11 +61,11 @@ async def stripe_webhook(request: Request):
     payment_intent_id = session.get("payment_intent")
     stripe_customer_id = session.get("customer")
 
-    # Traer line_items con price expandido para leer price.metadata
+    # ✅ Expandimos price.product para poder leer product.metadata
     try:
         full = stripe.checkout.Session.retrieve(
             checkout_session_id,
-            expand=["line_items.data.price"],
+            expand=["line_items.data.price.product"],
         )
     except Exception as e:
         print("Session.retrieve failed:", type(e).__name__, _safe(e))
@@ -78,19 +78,50 @@ async def stripe_webhook(request: Request):
 
     price = (items[0].get("price") or {})
     price_id = price.get("id")
+
+    # -----------------------------
+    # ✅ Metadata: price -> product -> session -> fallback mapping
+    # -----------------------------
     price_md = price.get("metadata") or {}
 
-    plan_code = (price_md.get("plan_code") or md.get("plan_code") or "").strip().lower()
-    quota_total = int(price_md.get("quota_total") or 0)
-    validity_months = int(price_md.get("validity_months") or 12)
+    product = price.get("product")
+    product_md = {}
+    if isinstance(product, dict):
+        product_md = product.get("metadata") or {}
 
-    if plan_code not in ("p99", "p199"):
+    # Fuente de verdad de respaldo (por si falta metadata en Stripe)
+    PLAN_TO_QUOTA = {"p99": 100, "p199": 300}
+    PLAN_TO_MONTHS = {"p99": 12, "p199": 12}
+
+    plan_code = (
+        price_md.get("plan_code")
+        or product_md.get("plan_code")
+        or (md.get("plan_code") if isinstance(md, dict) else None)
+        or ""
+    ).strip().lower()
+
+    if plan_code not in PLAN_TO_QUOTA:
         print("checkout.session.completed: invalid plan_code:", _safe(plan_code))
+        print("DEBUG md.plan_code:", _safe(md.get("plan_code") if isinstance(md, dict) else None))
+        print("DEBUG price_md.plan_code:", _safe(price_md.get("plan_code")))
+        print("DEBUG product_md.plan_code:", _safe(product_md.get("plan_code")))
         return {"ok": True}
 
-    if quota_total <= 0:
-        print("checkout.session.completed: missing quota_total in price.metadata")
-        return {"ok": True}
+    raw_quota = price_md.get("quota_total") or product_md.get("quota_total")
+    quota_total = int(raw_quota) if raw_quota else int(PLAN_TO_QUOTA[plan_code])
+
+    raw_months = price_md.get("validity_months") or product_md.get("validity_months")
+    validity_months = int(raw_months) if raw_months else int(PLAN_TO_MONTHS[plan_code])
+
+    # Debug útil mientras lo estabilizas
+    print(
+        "checkout.session.completed resolved:",
+        "user:", _safe(user_id),
+        "plan:", _safe(plan_code),
+        "quota:", quota_total,
+        "months:", validity_months,
+        "price_id:", _safe(price_id),
+    )
 
     # Insert idempotente (stripe_checkout_session_id es UNIQUE)
     try:
@@ -132,7 +163,16 @@ async def stripe_webhook(request: Request):
                         payment_intent_id,
                     ),
                 )
-                print("Entitlement insert rowcount:", cur.rowcount, "user:", user_id, "plan:", plan_code, "quota:", quota_total)
+                print(
+                    "Entitlement insert rowcount:",
+                    cur.rowcount,
+                    "user:",
+                    user_id,
+                    "plan:",
+ plan_code,
+                    "quota:",
+                    quota_total,
+                )
             conn.commit()
     except Exception as e:
         print("DB entitlement insert failed:", type(e).__name__, _safe(e))

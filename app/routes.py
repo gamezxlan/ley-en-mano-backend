@@ -757,6 +757,7 @@ def consultar(request: Request, response: Response, data: Consulta):
             allowed=False,
             reason=f"gemini_error:{type(e).__name__}:{str(e)[:180]}",
             ip_hash=ip_hash,
+            entitlement_id=(consumed["entitlement_id"] if consumed else None),
         )
         raise HTTPException(status_code=502, detail="IA no disponible. Reintenta.")
 
@@ -765,6 +766,8 @@ def consultar(request: Request, response: Response, data: Consulta):
 
     if not normalized:
         bad_snip = raw[:240].replace("\n", "\\n")
+        if consumed and consumed.get("entitlement_id"):
+            refund_entitlement(consumed["entitlement_id"])
         insert_usage_event(
             visitor_id=visitor_id,
             user_id=user_id,
@@ -775,6 +778,7 @@ def consultar(request: Request, response: Response, data: Consulta):
             allowed=False,
             reason=f"invalid_model_output:{bad_snip}",
             ip_hash=ip_hash,
+            entitlement_id=(consumed["entitlement_id"] if consumed else None),
         )
         raise HTTPException(status_code=502, detail="Respuesta legal inválida. Reintenta.")
 
@@ -794,12 +798,14 @@ def consultar(request: Request, response: Response, data: Consulta):
             allowed=False,
             reason=f"json_parse_error:{bad_snip}",
             ip_hash=ip_hash,
+            entitlement_id=(consumed["entitlement_id"] if consumed else None),
         )
         raise HTTPException(status_code=502, detail="Respuesta legal inválida. Reintenta.")
 
     _upgrade_lowercase_to_legacy(obj)
     _drop_lowercase_keys_if_present(obj)
     obj = enforce_profile_shape_legacy(obj, pol.profile)
+    remaining_after = consumed["remaining_after"] if consumed else max(0, pol.remaining - 1)
 
     insert_usage_event(
         visitor_id=visitor_id,
@@ -819,7 +825,7 @@ def consultar(request: Request, response: Response, data: Consulta):
         "profile": pol.profile,
         "tier": pol.tier,  # ✅ NUEVO
         "plan_code": pol.plan_code,
-        "remaining_after": max(0, pol.remaining - 1),
+        "remaining_after": remaining_after,
         "reset_at": pol.reset_at_iso,
         "respuesta": obj,
         "subscription_status": pol.subscription_status,
