@@ -105,36 +105,44 @@ def _save_user_stripe_customer_id(user_id: str, stripe_customer_id: str):
                 """,
                 (stripe_customer_id, user_id),
             )
-        conn.commit()
+        conn.commit()  # ✅ IMPORTANTE
 
 def _get_or_create_stripe_customer(*, user_id: str, email: str | None) -> str:
+    """
+    ✅ AUTOCURABLE:
+    - Si users.stripe_customer_id existe, valida que exista en Stripe (modo actual test/live).
+    - Si Stripe responde "No such customer" (o fue borrado), crea uno nuevo y actualiza DB.
+    """
     existing = _get_user_stripe_customer_id(user_id)
+
     if existing:
-        # ✅ Validar que exista en el "mode" actual (test/live)
         try:
             stripe.Customer.retrieve(existing)
             return existing
         except stripe.error.InvalidRequestError as e:
-            # Ej: "No such customer" (muy típico cuando cambiaste de test <-> live)
-            print("Stripe customer invalid, recreating:", existing, "err:", str(e)[:200])
+            # Ej: No such customer (típico por test<->live o borrado)
+            print("Stripe customer invalid, recreating:", existing, "err:", str(e)[:220])
         except Exception as e:
-            # Cualquier otra cosa rara: también recreamos
-            print("Stripe customer retrieve failed, recreating:", existing, type(e).__name__, str(e)[:200])
+            print("Stripe customer retrieve failed, recreating:", existing, type(e).__name__, str(e)[:220])
 
-    # Crear nuevo customer
+    # Crear customer nuevo
     try:
         customer = stripe.Customer.create(
             email=email if email else None,
             metadata={"user_id": user_id, "app": "leyenmano"},
         )
     except Exception as e:
-        raise HTTPException(status_code=502, detail=f"Stripe customer error: {type(e).__name__}: {str(e)[:220]}")
+        raise HTTPException(
+            status_code=502,
+            detail=f"Stripe customer error: {type(e).__name__}: {str(e)[:220]}",
+        )
 
     cid = customer.get("id")
     if not cid:
         raise HTTPException(status_code=502, detail="Stripe customer creation failed (no id)")
 
     _save_user_stripe_customer_id(user_id, str(cid))
+    print("Stripe customer created and saved:", str(cid), "for user:", user_id)
     return str(cid)
 
 # -----------------------
@@ -157,8 +165,9 @@ def create_checkout_session(request: Request, body: CheckoutRequest):
     price_id = PLAN_TO_PRICE[plan_code]
     email = _get_user_email(user_id)
 
-    # ✅ Customer real (evita que Stripe cree "Invitado")
+    # ✅ Customer real (autocurable)
     stripe_customer_id = _get_or_create_stripe_customer(user_id=user_id, email=email)
+    print("USING STRIPE CUSTOMER:", stripe_customer_id, "user:", user_id, "plan:", plan_code)
 
     success_url = f"{FRONTEND_BASE_URL}/?billing=ok"
     cancel_url = f"{FRONTEND_BASE_URL}/?billing=cancel"
@@ -166,22 +175,11 @@ def create_checkout_session(request: Request, body: CheckoutRequest):
     try:
         session = stripe.checkout.Session.create(
             mode="payment",
+            customer=stripe_customer_id,  # ✅ Fuente de verdad
             line_items=[{"price": price_id, "quantity": 1}],
             success_url=success_url,
             cancel_url=cancel_url,
-
-            # ✅ Vincula el pago a un Customer real
-            customer=stripe_customer_id,
-
-            # (opcional) fuerza que Checkout use el customer y no haga cosas raras
-            customer_update={
-                "address": "auto",
-                "name": "auto",
-            },
-
             client_reference_id=user_id,
-
-            # ✅ metadata en session (para webhook)
             metadata={
                 "user_id": user_id,
                 "plan_code": plan_code,
@@ -191,6 +189,6 @@ def create_checkout_session(request: Request, body: CheckoutRequest):
         )
     except Exception as e:
         print("Stripe checkout error:", type(e).__name__, str(e))
-        raise HTTPException(status_code=502, detail=f"Stripe error: {type(e).__name__}")
+        raise HTTPException(status_code=502, detail=f"Stripe error: {type(e).__name__}: {str(e)[:220]}")
 
     return {"url": session.url}
