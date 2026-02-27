@@ -158,6 +158,58 @@ def get_latest_entitlement_any_status(user_id: str):
         "created_at": row[6],
     }
 
+# ======================================================
+# UPGRADE HELPERS
+# ======================================================
+
+def expire_entitlement(entitlement_id: str, *, note: str | None = None):
+    """
+    Marca un entitlement como expired (por upgrade u otra razón).
+    """
+    if not entitlement_id:
+        return
+    with pool.connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE entitlements
+                SET status = 'expired'
+                WHERE entitlement_id = %s
+                """,
+                (entitlement_id,),
+            )
+        conn.commit()
+
+
+def get_entitlement_by_id(entitlement_id: str):
+    if not entitlement_id:
+        return None
+    with pool.connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT entitlement_id, user_id, plan_code, quota_total, remaining, valid_until, status, created_at
+                FROM entitlements
+                WHERE entitlement_id = %s
+                """,
+                (entitlement_id,),
+            )
+            row = cur.fetchone()
+
+    if not row:
+        return None
+
+    return {
+        "entitlement_id": row[0],
+        "user_id": row[1],
+        "plan_code": row[2],
+        "quota_total": int(row[3]),
+        "remaining": int(row[4]),
+        "valid_until": row[5],
+        "status": row[6],
+        "created_at": row[7],
+    }
+
 
 def consume_entitlement(user_id: str):
     """

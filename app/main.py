@@ -10,6 +10,7 @@ from .cache import create_caches
 from .auth_routes import router as auth_router
 from .billing_routes import router as billing_router
 from .billing_webhook import router as webhook_router
+from .upgrade_checkout import router as upgrade_checkout
 
 
 ENV = os.getenv("ENV", "development")
@@ -63,3 +64,4 @@ app.include_router(router)
 app.include_router(auth_router)
 app.include_router(billing_router)
 app.include_router(webhook_router)
+app.include_router(upgrade_checkout)

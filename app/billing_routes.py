@@ -5,7 +5,7 @@ from fastapi import APIRouter, Request, HTTPException
 from pydantic import BaseModel
 import os
 import hashlib
-
+from .usage_repo import get_active_entitlement
 import stripe
 from .db import pool
 
@@ -26,6 +26,67 @@ SESSION_PEPPER = os.getenv("SESSION_PEPPER", "")
 
 PRICE_P99 = os.environ["STRIPE_PRICE_P99"]
 PRICE_P199 = os.environ["STRIPE_PRICE_P199"]
+
+def _get_plan_row(plan_code: str):
+    """
+    Lee el plan desde Postgres: plans(plan_code, annual_quota, price_mxn, stripe_price_id)
+    """
+    with pool.connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT plan_code, annual_quota, price_mxn, stripe_price_id
+                FROM plans
+                WHERE plan_code = %s
+                LIMIT 1
+                """,
+                (plan_code,),
+            )
+            row = cur.fetchone()
+
+    if not row:
+        return None
+
+    return {
+        "plan_code": str(row[0]),
+        "annual_quota": int(row[1]) if row[1] is not None else None,
+        "price_mxn": int(row[2]) if row[2] is not None else None,
+        "stripe_price_id": str(row[3]) if row[3] else None,
+    }
+
+
+def _mxn_to_cents(mxn: int) -> int:
+    return int(max(0, mxn)) * 100
+
+
+def _create_one_time_coupon(*, amount_off_mxn: int, user_id: str, from_entitlement_id: str) -> str:
+    """
+    Cupón de 1 uso para aplicar crédito del upgrade.
+    """
+    cents = _mxn_to_cents(amount_off_mxn)
+    if cents <= 0:
+        raise HTTPException(status_code=400, detail="No hay crédito para aplicar")
+
+    try:
+        coupon = stripe.Coupon.create(
+            amount_off=cents,
+            currency="mxn",
+            duration="once",
+            max_redemptions=1,
+            name="Crédito por upgrade",
+            # opcional: que caduque rápido
+            # redeem_by=int(time.time()) + 60*30,
+            metadata={
+                "app": "leyenmano",
+                "user_id": user_id,
+                "from_entitlement_id": from_entitlement_id,
+                "kind": "upgrade_credit",
+            },
+        )
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Stripe coupon error: {type(e).__name__}: {str(e)[:180]}")
+
+    return str(coupon["id"])
 
 PLAN_TO_PRICE = {
     "p99": PRICE_P99,

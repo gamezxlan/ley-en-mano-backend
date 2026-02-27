@@ -22,6 +22,30 @@ def _safe(v, maxlen: int = 180):
         return "<unprintable>"
     return s if len(s) <= maxlen else (s[:maxlen] + "...")
 
+def _expire_entitlement_for_user(*, entitlement_id: str, user_id: str):
+    """
+    Marca como expired solo si el entitlement pertenece al user_id.
+    Idempotente: si ya estaba expired, no pasa nada.
+    """
+    if not entitlement_id or not user_id:
+        return
+
+    try:
+        with pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE entitlements
+                    SET status = 'expired'
+                    WHERE entitlement_id = %s
+                      AND user_id = %s
+                    """,
+                    (entitlement_id, user_id),
+                )
+            conn.commit()
+    except Exception as e:
+        print("Expire entitlement failed:", type(e).__name__, _safe(e))
+
 
 @router.post("/webhook")
 async def stripe_webhook(request: Request):
@@ -50,6 +74,10 @@ async def stripe_webhook(request: Request):
     session = obj
     md = session.get("metadata") or {}
     user_id = (md.get("user_id") or "").strip()
+
+    billing_type = (md.get("billing_type") or "").strip().lower()  # "one_time" | "upgrade"
+    from_entitlement_id = (md.get("from_entitlement_id") or "").strip()
+    to_plan_code_md = (md.get("to_plan_code") or "").strip().lower()  # "p199" si upgrade
 
     if not user_id:
         print("checkout.session.completed: missing user_id in metadata")
@@ -94,7 +122,8 @@ async def stripe_webhook(request: Request):
     PLAN_TO_MONTHS = {"p99": 12, "p199": 12}
 
     plan_code = (
-        price_md.get("plan_code")
+        (to_plan_code_md if (billing_type == "upgrade" and to_plan_code_md) else None)
+        or price_md.get("plan_code")
         or product_md.get("plan_code")
         or (md.get("plan_code") if isinstance(md, dict) else None)
         or ""
@@ -123,7 +152,8 @@ async def stripe_webhook(request: Request):
         "price_id:", _safe(price_id),
     )
 
-    # Insert idempotente (stripe_checkout_session_id es UNIQUE)
+        # Insert idempotente (stripe_checkout_session_id es UNIQUE)
+    inserted = False
     try:
         with pool.connection() as conn:
             with conn.cursor() as cur:
@@ -163,13 +193,16 @@ async def stripe_webhook(request: Request):
                         payment_intent_id,
                     ),
                 )
+
+                inserted = (cur.rowcount == 1)
+
                 print(
                     "Entitlement insert rowcount:",
                     cur.rowcount,
                     "user:",
                     user_id,
                     "plan:",
- plan_code,
+                    plan_code,
                     "quota:",
                     quota_total,
                 )
@@ -177,5 +210,17 @@ async def stripe_webhook(request: Request):
     except Exception as e:
         print("DB entitlement insert failed:", type(e).__name__, _safe(e))
         return {"ok": True}
+
+    # ------------------------------------------------------
+    # ✅ UPGRADE: expirar anterior SOLO si insertamos uno nuevo
+    # ------------------------------------------------------
+    if inserted and billing_type == "upgrade" and from_entitlement_id:
+        _expire_entitlement_for_user(entitlement_id=from_entitlement_id, user_id=user_id)
+        print(
+            "UPGRADE: expired previous entitlement:",
+            _safe(from_entitlement_id),
+            "user:",
+            _safe(user_id),
+        )
 
     return {"ok": True}
