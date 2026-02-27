@@ -84,19 +84,18 @@ def _expire_entitlements(user_id: str):
 
 def get_active_entitlement(user_id: str):
     """
-    Devuelve el entitlement "actual" del usuario para mostrar en /me y /policy.
+    Devuelve el entitlement USABLE del usuario (premium real).
 
-    Reglas:
-    - Primero expira los vencidos por tiempo
-    - Luego elige:
-      a) el mejor 'active' vigente con remaining > 0
-      b) si no hay, el más reciente 'quota_exhausted' vigente (para mostrar estado)
+    Regla:
+    - Expira por tiempo y marca quota_exhausted si remaining <= 0
+    - Devuelve SOLO:
+      status='active', valid_until > NOW(), remaining > 0
+    - Si no hay uno usable -> None
     """
     _expire_entitlements(user_id)
 
     with pool.connection() as conn:
         with conn.cursor() as cur:
-            # 1) Preferimos uno ACTIVO con remaining > 0
             cur.execute(
                 """
                 SELECT entitlement_id, plan_code, quota_total, remaining, valid_until, status, created_at
@@ -112,21 +111,39 @@ def get_active_entitlement(user_id: str):
             )
             row = cur.fetchone()
 
-            if not row:
-                # 2) Si no hay activo usable, mostramos el vigente agotado (si existe)
-                cur.execute(
-                    """
-                    SELECT entitlement_id, plan_code, quota_total, remaining, valid_until, status, created_at
-                    FROM entitlements
-                    WHERE user_id = %s
-                      AND status = 'quota_exhausted'
-                      AND valid_until > NOW()
-                    ORDER BY valid_until DESC, created_at DESC
-                    LIMIT 1
-                    """,
-                    (user_id,),
-                )
-                row = cur.fetchone()
+    if not row:
+        return None
+
+    return {
+        "entitlement_id": row[0],
+        "plan_code": row[1],
+        "quota_total": int(row[2]),
+        "remaining": int(row[3]),
+        "valid_until": row[4],
+        "status": row[5],
+        "created_at": row[6],
+    }
+
+def get_latest_entitlement_any_status(user_id: str):
+    """
+    Devuelve el entitlement más reciente del usuario aunque esté quota_exhausted o expired.
+    Útil para UI (mostrar 'agotado' / 'vencido').
+    """
+    _expire_entitlements(user_id)
+
+    with pool.connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT entitlement_id, plan_code, quota_total, remaining, valid_until, status, created_at
+                FROM entitlements
+                WHERE user_id = %s
+                ORDER BY created_at DESC
+                LIMIT 1
+                """,
+                (user_id,),
+            )
+            row = cur.fetchone()
 
     if not row:
         return None

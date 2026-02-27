@@ -12,6 +12,7 @@ from .usage_repo import (
     ensure_user,
     consume_entitlement,
     refund_entitlement,
+    get_latest_entitlement_any_status,
 )
 from .policy_service import build_policy
 from .db import pool
@@ -534,6 +535,17 @@ def me(request: Request):
     # Si no hay visitor_id aún, solo regresa estado vacío (frontend puede crear uno)
     if not visitor_id:
         email = _get_user_email(user_id) if user_id else None
+        latest_ent = get_latest_entitlement_any_status(user_id) if user_id else None
+        billing_status = None
+        if latest_ent:
+            billing_status = {
+                "status": latest_ent.get("status"),
+                "plan_code": latest_ent.get("plan_code"),
+                "quota_total": latest_ent.get("quota_total"),
+                "remaining": latest_ent.get("remaining"),
+                "valid_until": _iso(latest_ent.get("valid_until")),
+                "created_at": _iso(latest_ent.get("created_at")),
+            }
         return {
             "visitor_id": None,
             "user_id": user_id,
@@ -546,6 +558,7 @@ def me(request: Request):
             "subscription_status": None,
             "subscription_start": None,
             "subscription_end": None,
+            "billing_status": billing_status,
         }
 
     _validate_visitor_id(visitor_id)
@@ -609,6 +622,19 @@ def policy(request: Request, response: Response, data: PolicyRequest):
     ip_hash = hash_ip(ip)
     pol = build_policy(visitor_id, user_id, ip_hash)
 
+    latest_ent = get_latest_entitlement_any_status(user_id) if user_id else None
+
+    billing_status = None
+    if latest_ent:
+        billing_status = {
+            "status": latest_ent.get("status"),
+            "plan_code": latest_ent.get("plan_code"),
+            "quota_total": latest_ent.get("quota_total"),
+            "remaining": latest_ent.get("remaining"),
+            "valid_until": _iso(latest_ent.get("valid_until")),
+            "created_at": _iso(latest_ent.get("created_at")),
+        }
+
     return {
         "visitor_id": visitor_id,
         "user_id": user_id,
@@ -624,6 +650,7 @@ def policy(request: Request, response: Response, data: PolicyRequest):
         "subscription_status": pol.subscription_status,
         "subscription_start": pol.subscription_start_iso,
         "subscription_end": pol.subscription_end_iso,
+        "billing_status": billing_status,
     }
 
 @router.post("/consultar")
@@ -817,6 +844,7 @@ def consultar(request: Request, response: Response, data: Consulta):
         allowed=True,
         reason=None,
         ip_hash=ip_hash,
+        entitlement_id=(consumed["entitlement_id"] if consumed else None),
     )
 
     resp = {

@@ -6,3 +6,5 @@ slowapi
 psycopg[binary]==3.*
 psycopg-pool==3.*
 stripe>=10.0.0
+fastapi>=0.110.0
+pydantic>=2.6.0
