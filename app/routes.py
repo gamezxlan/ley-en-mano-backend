@@ -6,7 +6,13 @@ from .cache import get_cache, MODEL_FLASH, MODEL_LITE
 from .ratelimit import limiter
 from .blocklist import check_ip_visitor
 from .ip_utils import get_client_ip, hash_ip
-from .usage_repo import upsert_visitor, insert_usage_event, ensure_user, mark_subscription_quota_exhausted
+from .usage_repo import (
+    upsert_visitor,
+    insert_usage_event,
+    ensure_user,
+    consume_entitlement,
+    refund_entitlement,
+)
 from .policy_service import build_policy
 from .db import pool
 
@@ -659,7 +665,43 @@ def consultar(request: Request, response: Response, data: Consulta):
     upsert_visitor(visitor_id, user_id)
 
     pol = build_policy(visitor_id, user_id, ip_hash)
-    if pol.remaining <= 0:
+
+    # ------------------------------------------------------
+    # PREMIUM: consumir entitlement (atómico)
+    # ------------------------------------------------------
+    consumed = None
+    if pol.profile == "premium" and user_id:
+        consumed = consume_entitlement(user_id)
+        if not consumed:
+            insert_usage_event(
+                visitor_id=visitor_id,
+                user_id=user_id,
+                profile=pol.profile,
+                plan_code=pol.plan_code,
+                model_used="flash" if pol.model_kind == "flash" else "flash-lite",
+                endpoint="/consultar",
+                allowed=False,
+                reason="quota_exceeded",
+                ip_hash=ip_hash,
+                entitlement_id=None,
+            )
+            raise HTTPException(
+                status_code=429,
+                detail={
+                    "error": "QUOTA_EXCEEDED",
+                    "profile": pol.profile,
+                    "reset_at": pol.reset_at_iso,
+                    "remaining": 0,
+                    "subscription_status": pol.subscription_status,
+                    "subscription_start": pol.subscription_start_iso,
+                    "subscription_end": pol.subscription_end_iso,
+                },
+            )
+
+    # ------------------------------------------------------
+    # FREE/GUEST: se conserva la lógica actual basada en pol.remaining
+    # ------------------------------------------------------
+    if pol.profile != "premium" and pol.remaining <= 0:
         insert_usage_event(
             visitor_id=visitor_id,
             user_id=user_id,
@@ -670,11 +712,8 @@ def consultar(request: Request, response: Response, data: Consulta):
             allowed=False,
             reason="quota_exceeded",
             ip_hash=ip_hash,
+            entitlement_id=None,
         )
-
-        if user_id:
-            mark_subscription_quota_exhausted(user_id)
-
         raise HTTPException(
             status_code=429,
             detail={
@@ -706,6 +745,8 @@ def consultar(request: Request, response: Response, data: Consulta):
             ),
         )
     except Exception as e:
+        if consumed and consumed.get("entitlement_id"):
+            refund_entitlement(consumed["entitlement_id"])
         insert_usage_event(
             visitor_id=visitor_id,
             user_id=user_id,
@@ -741,6 +782,8 @@ def consultar(request: Request, response: Response, data: Consulta):
         obj = json.loads(normalized)
     except Exception:
         bad_snip = normalized[:240].replace("\n", "\\n")
+        if consumed and consumed.get("entitlement_id"):
+            refund_entitlement(consumed["entitlement_id"])
         insert_usage_event(
             visitor_id=visitor_id,
             user_id=user_id,

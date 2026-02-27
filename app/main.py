@@ -10,7 +10,6 @@ from .cache import create_caches
 from .auth_routes import router as auth_router
 from .billing_routes import router as billing_router
 from .billing_webhook import router as webhook_router
-from .billing_portal import router as portal_router
 
 
 ENV = os.getenv("ENV", "development")
@@ -64,4 +63,3 @@ app.include_router(router)
 app.include_router(auth_router)
 app.include_router(billing_router)
 app.include_router(webhook_router)
-app.include_router(portal_router)

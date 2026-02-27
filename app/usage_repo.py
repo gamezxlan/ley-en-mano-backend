@@ -7,6 +7,7 @@ from uuid import uuid4
 from .db import pool
 
 MX_TZ = ZoneInfo("America/Mexico_City")
+UTC = ZoneInfo("UTC")
 
 
 @dataclass
@@ -27,153 +28,7 @@ def upsert_visitor(visitor_id: str, user_id: str | None):
                   user_id = COALESCE(EXCLUDED.user_id, visitors.user_id),
                   last_seen_at = NOW()
                 """,
-                (visitor_id, user_id)
-            )
-        conn.commit()
-
-
-def get_active_subscription(user_id: str):
-    """
-    Regresa dict con plan_code, current_period_start, current_period_end si hay subs vigente.
-    Además expira ('expired') cualquier suscripción 'active' cuyo periodo ya terminó.
-    """
-    with pool.connection() as conn:
-        with conn.cursor() as cur:
-
-            # 🔄 Expirar automáticamente suscripciones vencidas por tiempo
-            cur.execute(
-                """
-                UPDATE subscriptions
-                SET status = 'expired'
-                WHERE user_id = %s
-                  AND status = 'active'
-                  AND current_period_end <= NOW()
-                """,
-                (user_id,),
-            )
-
-            # 🔍 Buscar suscripción vigente
-            cur.execute(
-                """
-                SELECT plan_code, status, current_period_start, current_period_end
-                FROM subscriptions
-                WHERE user_id = %s
-                  AND status IN ('active', 'quota_exhausted')
-                  AND current_period_end > NOW()
-                ORDER BY current_period_end DESC
-                LIMIT 1
-                """,
-                (user_id,),
-            )
-            row = cur.fetchone()
-
-        # ✅ IMPORTANTE: persistir el UPDATE
-        conn.commit()
-
-    if not row:
-        return None
-
-    return {
-        "plan_code": row[0],
-        "status": row[1],
-        "current_period_start": row[2],
-        "current_period_end": row[3],
-    }
-
-
-def get_plan_quota(plan_code: str) -> int:
-    with pool.connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                "SELECT annual_quota FROM plans WHERE plan_code=%s",
-                (plan_code,)
-            )
-            row = cur.fetchone()
-    if not row or row[0] is None:
-        return 0
-    return int(row[0])
-
-
-def _day_window_mx(now: datetime):
-    local = now.astimezone(MX_TZ)
-    start = local.replace(hour=0, minute=0, second=0, microsecond=0)
-    end = start + timedelta(days=1)
-    return start.astimezone(ZoneInfo("UTC")), end.astimezone(ZoneInfo("UTC"))
-
-
-def count_day_usage(visitor_id: str, user_id: str | None) -> int:
-    now = datetime.now(tz=ZoneInfo("UTC"))
-    start_utc, end_utc = _day_window_mx(now)
-
-    with pool.connection() as conn:
-        with conn.cursor() as cur:
-            if user_id:
-                cur.execute(
-                    """
-                    SELECT COUNT(*)
-                    FROM usage_events
-                    WHERE user_id = %s
-                      AND allowed = TRUE
-                      AND created_at >= %s AND created_at < %s
-                    """,
-                    (user_id, start_utc, end_utc)
-                )
-            else:
-                cur.execute(
-                    """
-                    SELECT COUNT(*)
-                    FROM usage_events
-                    WHERE visitor_id = %s
-                      AND allowed = TRUE
-                      AND created_at >= %s AND created_at < %s
-                    """,
-                    (visitor_id, start_utc, end_utc)
-                )
-            row = cur.fetchone()
-    return int(row[0]) if row else 0
-
-
-def count_period_usage(user_id: str, period_start, period_end) -> int:
-    with pool.connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT COUNT(*)
-                FROM usage_events
-                WHERE user_id = %s
-                  AND allowed = TRUE
-                  AND created_at >= %s AND created_at < %s
-                """,
-                (user_id, period_start, period_end)
-            )
-            row = cur.fetchone()
-    return int(row[0]) if row else 0
-
-
-def insert_usage_event(
-    visitor_id: str,
-    user_id: str | None,
-    profile: str,
-    plan_code: str | None,
-    model_used: str,
-    endpoint: str,
-    allowed: bool,
-    reason: str | None,
-    ip_hash: str | None,
-):
-    event_id = str(uuid4())
-    with pool.connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                INSERT INTO usage_events(
-                  event_id, visitor_id, user_id, profile, plan_code, model_used,
-                  endpoint, allowed, reason, ip_hash, created_at
-                )
-                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,NOW())
-                """,
-                (event_id, visitor_id, user_id, profile, plan_code, model_used,
-                 endpoint, allowed, reason, ip_hash)
+                (visitor_id, user_id),
             )
         conn.commit()
 
@@ -187,33 +42,236 @@ def ensure_user(user_id: str):
                 VALUES (%s, NULL, NOW())
                 ON CONFLICT (user_id) DO NOTHING
                 """,
-                (user_id,)
+                (user_id,),
             )
         conn.commit()
 
 
-def mark_subscription_quota_exhausted(user_id: str):
+# ======================================================
+# ENTITLEMENTS (NUEVO CORE)
+# ======================================================
+
+def _expire_entitlements(user_id: str):
     """
-    Marca como quota_exhausted la suscripción activa vigente del usuario.
-    No toca suscripciones expiradas.
+    1) Marca como expired si valid_until ya pasó
+    2) Marca como quota_exhausted si remaining <= 0
     """
     with pool.connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
                 """
-                UPDATE subscriptions
+                UPDATE entitlements
+                SET status = 'expired'
+                WHERE user_id = %s
+                  AND status = 'active'
+                  AND valid_until <= NOW()
+                """,
+                (user_id,),
+            )
+            cur.execute(
+                """
+                UPDATE entitlements
                 SET status = 'quota_exhausted'
                 WHERE user_id = %s
                   AND status = 'active'
-                  AND current_period_end > NOW()
+                  AND remaining <= 0
+                  AND valid_until > NOW()
                 """,
                 (user_id,),
             )
         conn.commit()
 
 
+def get_active_entitlement(user_id: str):
+    """
+    Devuelve el entitlement "actual" del usuario para mostrar en /me y /policy.
+
+    Reglas:
+    - Primero expira los vencidos por tiempo
+    - Luego elige:
+      a) el mejor 'active' vigente con remaining > 0
+      b) si no hay, el más reciente 'quota_exhausted' vigente (para mostrar estado)
+    """
+    _expire_entitlements(user_id)
+
+    with pool.connection() as conn:
+        with conn.cursor() as cur:
+            # 1) Preferimos uno ACTIVO con remaining > 0
+            cur.execute(
+                """
+                SELECT entitlement_id, plan_code, quota_total, remaining, valid_until, status, created_at
+                FROM entitlements
+                WHERE user_id = %s
+                  AND status = 'active'
+                  AND valid_until > NOW()
+                  AND remaining > 0
+                ORDER BY valid_until DESC, created_at DESC
+                LIMIT 1
+                """,
+                (user_id,),
+            )
+            row = cur.fetchone()
+
+            if not row:
+                # 2) Si no hay activo usable, mostramos el vigente agotado (si existe)
+                cur.execute(
+                    """
+                    SELECT entitlement_id, plan_code, quota_total, remaining, valid_until, status, created_at
+                    FROM entitlements
+                    WHERE user_id = %s
+                      AND status = 'quota_exhausted'
+                      AND valid_until > NOW()
+                    ORDER BY valid_until DESC, created_at DESC
+                    LIMIT 1
+                    """,
+                    (user_id,),
+                )
+                row = cur.fetchone()
+
+    if not row:
+        return None
+
+    return {
+        "entitlement_id": row[0],
+        "plan_code": row[1],
+        "quota_total": int(row[2]),
+        "remaining": int(row[3]),
+        "valid_until": row[4],
+        "status": row[5],
+        "created_at": row[6],
+    }
+
+
+def consume_entitlement(user_id: str):
+    """
+    Descuenta 1 consulta de forma ATÓMICA.
+
+    - Selecciona un entitlement activo, vigente, remaining > 0
+    - Lo bloquea FOR UPDATE
+    - Decrementa remaining
+    - Si queda en 0, lo marca quota_exhausted
+
+    Devuelve dict con entitlement_id, plan_code, remaining_after, valid_until, status
+    o None si no hay cupo.
+    """
+    _expire_entitlements(user_id)
+
+    with pool.connection() as conn:
+        with conn.cursor() as cur:
+            # Elegimos el "mejor" paquete activo que aún tenga saldo.
+            cur.execute(
+                """
+                SELECT entitlement_id, plan_code, remaining, valid_until
+                FROM entitlements
+                WHERE user_id = %s
+                  AND status = 'active'
+                  AND valid_until > NOW()
+                  AND remaining > 0
+                ORDER BY valid_until DESC, created_at DESC
+                FOR UPDATE
+                LIMIT 1
+                """,
+                (user_id,),
+            )
+            row = cur.fetchone()
+
+            if not row:
+                conn.commit()
+                return None
+
+            entitlement_id, plan_code, remaining, valid_until = row
+            remaining_after = int(remaining) - 1
+
+            new_status = "quota_exhausted" if remaining_after <= 0 else "active"
+
+            cur.execute(
+                """
+                UPDATE entitlements
+                SET remaining = %s,
+                    status = %s
+                WHERE entitlement_id = %s
+                """,
+                (max(0, remaining_after), new_status, entitlement_id),
+            )
+        conn.commit()
+
+    return {
+        "entitlement_id": entitlement_id,
+        "plan_code": plan_code,
+        "remaining_after": max(0, remaining_after),
+        "valid_until": valid_until,
+        "status": new_status,
+    }
+
+
+def refund_entitlement(entitlement_id):
+    """
+    Devuelve 1 consulta al entitlement.
+    Úsalo si decidimos 'consumir antes' y luego falla Gemini/JSON.
+    """
+    if not entitlement_id:
+        return
+
+    with pool.connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE entitlements
+                SET remaining = remaining + 1,
+                    status = 'active'
+                WHERE entitlement_id = %s
+                  AND valid_until > NOW()
+                """,
+                (entitlement_id,),
+            )
+        conn.commit()
+
+
+# ======================================================
+# FREE/GUEST LIMITS (IGUAL QUE ANTES)
+# ======================================================
+
+def _day_window_mx(now: datetime):
+    local = now.astimezone(MX_TZ)
+    start = local.replace(hour=0, minute=0, second=0, microsecond=0)
+    end = start + timedelta(days=1)
+    return start.astimezone(UTC), end.astimezone(UTC)
+
+
+def count_day_usage(visitor_id: str, user_id: str | None) -> int:
+    now = datetime.now(tz=UTC)
+    start_utc, end_utc = _day_window_mx(now)
+
+    with pool.connection() as conn:
+        with conn.cursor() as cur:
+            if user_id:
+                cur.execute(
+                    """
+                    SELECT COUNT(*)
+                    FROM usage_events
+                    WHERE user_id = %s
+                      AND allowed = TRUE
+                      AND created_at >= %s AND created_at < %s
+                    """,
+                    (user_id, start_utc, end_utc),
+                )
+            else:
+                cur.execute(
+                    """
+                    SELECT COUNT(*)
+                    FROM usage_events
+                    WHERE visitor_id = %s
+                      AND allowed = TRUE
+                      AND created_at >= %s AND created_at < %s
+                    """,
+                    (visitor_id, start_utc, end_utc),
+                )
+            row = cur.fetchone()
+    return int(row[0]) if row else 0
+
+
 def count_day_usage_by_ip(ip_hash: str) -> int:
-    now = datetime.now(tz=ZoneInfo("UTC"))
+    now = datetime.now(tz=UTC)
     start_utc, end_utc = _day_window_mx(now)
 
     with pool.connection() as conn:
@@ -231,3 +289,43 @@ def count_day_usage_by_ip(ip_hash: str) -> int:
             )
             row = cur.fetchone()
     return int(row[0]) if row else 0
+
+
+def insert_usage_event(
+    visitor_id: str,
+    user_id: str | None,
+    profile: str,
+    plan_code: str | None,
+    model_used: str,
+    endpoint: str,
+    allowed: bool,
+    reason: str | None,
+    ip_hash: str | None,
+    entitlement_id=None,  # <-- NUEVO
+):
+    event_id = str(uuid4())
+    with pool.connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO usage_events(
+                  event_id, visitor_id, user_id, profile, plan_code, model_used,
+                  endpoint, allowed, reason, ip_hash, entitlement_id, created_at
+                )
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,NOW())
+                """,
+                (
+                    event_id,
+                    visitor_id,
+                    user_id,
+                    profile,
+                    plan_code,
+                    model_used,
+                    endpoint,
+                    allowed,
+                    reason,
+                    ip_hash,
+                    entitlement_id,
+                ),
+            )
+        conn.commit()

@@ -110,26 +110,22 @@ def create_checkout_session(request: Request, body: CheckoutRequest):
 
     try:
         session = stripe.checkout.Session.create(
-            mode="subscription",
+            mode="payment",
             line_items=[{"price": price_id, "quantity": 1}],
             success_url=success_url,
             cancel_url=cancel_url,
             customer_email=email if email else None,
-            allow_promotion_codes=True,
             client_reference_id=user_id,
-            # ✅ importantísimo para que el webhook sepa a quién activar
+
+            # si NO quieres cupones/códigos:
+            # allow_promotion_codes=False,
+
+            # ✅ metadata en session (para webhook)
             metadata={
                 "user_id": user_id,
                 "plan_code": plan_code,
                 "app": "leyenmano",
-            },
-            # También propagamos metadata a la suscripción
-            subscription_data={
-                "metadata": {
-                    "user_id": user_id,
-                    "plan_code": plan_code,
-                    "app": "leyenmano",
-                }
+                "billing_type": "one_time",
             },
         )
     except Exception as e:

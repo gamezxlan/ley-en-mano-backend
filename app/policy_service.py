@@ -3,11 +3,9 @@ from dataclasses import dataclass
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from .usage_repo import (
-    get_active_subscription,
-    get_plan_quota,
+    get_active_entitlement,
     count_day_usage,
     count_day_usage_by_ip,
-    count_period_usage,
     MX_TZ,
 )
 
@@ -43,49 +41,48 @@ def _reset_at_daily_iso():
 
 def build_policy(visitor_id: str, user_id: str | None, ip_hash: str | None) -> Policy:
     # Premium si hay subs activa
-    if user_id:
-        sub = get_active_subscription(user_id)
-        if sub:
-            plan_code = sub["plan_code"]
-            quota = get_plan_quota(plan_code)
-            used = count_period_usage(user_id, sub["current_period_start"], sub["current_period_end"])
-            remaining = max(0, quota - used)
-            start_iso = sub["current_period_start"].astimezone(MX_TZ).isoformat()
-            end_iso = sub["current_period_end"].astimezone(MX_TZ).isoformat()
-            status = sub.get("status")
+        if user_id:
+            ent = get_active_entitlement(user_id)
+            if ent:
+                plan_code = ent["plan_code"]
+                quota = ent["quota_total"]
+                remaining = ent["remaining"]
+                start_iso = ent["created_at"].astimezone(MX_TZ).isoformat()
+                end_iso = ent["valid_until"].astimezone(MX_TZ).isoformat()
+                status = ent.get("status")
 
-            if plan_code == "p99":
+                if plan_code == "p99":
+                    return Policy(
+                        profile="premium",
+                        tier="premium_basic",
+                        model_kind="flash",
+                        response_mode="full_basic",
+                        cards_per_step="full",
+                        daily_limit=None,
+                        monthly_limit=quota,  # (tu UI lo usa como "límite del periodo")
+                        remaining=remaining,
+                        reset_at_iso=end_iso,
+                        plan_code=plan_code,
+                        subscription_status=status,
+                        subscription_start_iso=start_iso,
+                        subscription_end_iso=end_iso,
+                    )
+
                 return Policy(
                     profile="premium",
-                    tier="premium_basic",
-                    model_kind="flash",                 # 👈 distinto (opcional)
-                    response_mode="full_basic",  # 👈 distinto (opcional)
-                    cards_per_step="full",                # 👈 distinto (opcional)
+                    tier="premium_full",
+                    model_kind="flash",
+                    response_mode="full",
+                    cards_per_step="full",
                     daily_limit=None,
-                    monthly_limit=quota,               # (aunque sea anual, es tu quota del periodo)
+                    monthly_limit=quota,
                     remaining=remaining,
-                    reset_at_iso=sub["current_period_end"].astimezone(MX_TZ).isoformat(),
+                    reset_at_iso=end_iso,
                     plan_code=plan_code,
                     subscription_status=status,
                     subscription_start_iso=start_iso,
                     subscription_end_iso=end_iso,
                 )
-
-            return Policy(
-                profile="premium",
-                tier="premium_full",
-                model_kind="flash",
-                response_mode="full",
-                cards_per_step="full",
-                daily_limit=None,
-                monthly_limit=quota,
-                remaining=remaining,
-                reset_at_iso=sub["current_period_end"].astimezone(MX_TZ).isoformat(),
-                plan_code=plan_code,
-                subscription_status=status,
-                subscription_start_iso=start_iso,
-                subscription_end_iso=end_iso,
-            )
 
         # Registrado sin plan
         used = count_day_usage_by_ip(ip_hash) if ip_hash else count_day_usage(visitor_id, user_id)
