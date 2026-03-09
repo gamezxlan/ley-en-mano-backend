@@ -177,6 +177,7 @@ class Consulta(BaseModel):
     user_id: str | None = None
     locale: str | None = None
     source: str | None = None
+    first_experience_demo: bool = False
 
     @field_validator("visitor_id")
     @classmethod
@@ -212,7 +213,7 @@ def _effective_user_id(request: Request, body_user_id: str | None) -> str | None
 # OVERLAY / NORMALIZACIÓN
 # ======================================================
 
-def _policy_overlay_text(policy):
+def _policy_overlay_text_for_profile(profile: str, tier: str | None = None):
     common = """
 POLICY (OBLIGATORIA):
 - Responde en JSON PURO (sin ``` ni texto fuera del JSON).
@@ -222,7 +223,7 @@ POLICY (OBLIGATORIA):
   paso_1_inmediato, paso_2_discurso, paso_3_denuncia.
 """
 
-    if policy.profile == "guest":
+    if profile == "guest":
         return common + """
 PERFIL: GUEST
 - cards_per_step = 1
@@ -254,7 +255,7 @@ REGLAS:
 - Mantén paso_2_discurso con listas cortas (2–5 frases).
 """
 
-    if policy.profile == "free":
+    if profile == "free":
         return common + """
 PERFIL: FREE
 - cards_per_step = 1
@@ -290,7 +291,7 @@ REGLAS:
 - Mantén paso_2_discurso con listas cortas (2–5 frases).
 """
 
-    if policy.profile == "premium" and getattr(policy, "tier", None) == "premium_basic":
+    if profile == "premium" and tier == "premium_basic":
         return common + """
 PERFIL: PREMIUM_BASIC
 SCHEMA ESTRICTO:
@@ -336,8 +337,6 @@ REGLAS:
 - En campos de Formato de Emergencia, solo enlista los campos que son necesarios para llenar el formato
 """
 
-
-    # premium
     return common + """
 PERFIL: PREMIUM
 SCHEMA ESTRICTO:
@@ -389,6 +388,9 @@ REGLAS:
 - Si no aplica Riesgos y Consecuencias, Formato de Emergencia o Teléfono, usa null (no inventar).
 - En campos de Formato de Emergencia, solo enlista los campos que son necesarios para llenar el formato
 """
+
+def _policy_overlay_text(policy):
+    return _policy_overlay_text_for_profile(policy.profile, getattr(policy, "tier", None))
 
 LEGACY_KEYS = {
     "diagnostico": "Diagnóstico Jurídico",
@@ -732,6 +734,15 @@ def consultar(request: Request, response: Response, data: Consulta):
 
     pol = build_policy(visitor_id, user_id, ip_hash)
 
+    is_first_experience_demo = (
+        data.first_experience_demo is True
+        and not user_id
+        and pol.profile == "guest"
+    )
+
+    overlay_profile = "free" if is_first_experience_demo else pol.profile
+    overlay_tier = pol.tier
+
     # ------------------------------------------------------
     # PREMIUM: consumir entitlement (atómico)
     # ------------------------------------------------------
@@ -797,7 +808,7 @@ def consultar(request: Request, response: Response, data: Consulta):
     cache = get_cache(cache_kind)
     model_name = MODEL_FLASH if pol.model_kind == "flash" else MODEL_LITE
 
-    overlay = _policy_overlay_text(pol)
+    overlay = _policy_overlay_text_for_profile(overlay_profile, overlay_tier)
 
     try:
         response_ai = client.models.generate_content(
@@ -870,7 +881,8 @@ def consultar(request: Request, response: Response, data: Consulta):
 
     _upgrade_lowercase_to_legacy(obj)
     _drop_lowercase_keys_if_present(obj)
-    obj = enforce_profile_shape_legacy(obj, pol.profile)
+    shape_profile = "free" if is_first_experience_demo else pol.profile
+    obj = enforce_profile_shape_legacy(obj, shape_profile)
     remaining_after = consumed["remaining_after"] if consumed else max(0, pol.remaining - 1)
 
     insert_usage_event(
@@ -898,6 +910,8 @@ def consultar(request: Request, response: Response, data: Consulta):
         "subscription_status": pol.subscription_status,
         "subscription_start": pol.subscription_start_iso,
         "subscription_end": pol.subscription_end_iso,
+        "first_experience_demo_applied": is_first_experience_demo,
+        "response_profile": shape_profile,
     }
 
     if os.getenv("ENV") != "production":
